@@ -68,6 +68,15 @@ public:
     const float* c;
   };
 
+  // Added by Michael Fatemi, 2022 November 12
+  struct Coulomb {
+    bool enabled = false;
+    float alpha = 0.1f;
+    // Should be set manually
+    float epsilon = 0.0f;
+    float charges[10];
+  };
+
   struct ZBL {
     bool enabled = false;
     float rc_inner = 1.0f;
@@ -90,5 +99,6 @@ private:
   ANN annmb;
   NEP3_Data nep_data;
   ZBL zbl;
+  Coulomb coulomb;
   void update_potential(const float* parameters, ANN& ann);
 };

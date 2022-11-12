@@ -375,12 +375,58 @@ static __global__ void zero_force(const int N, float* g_fx, float* g_fy, float* 
   }
 }
 
+// Added by Michael Fatemi, 2022 November 12
+/*
+Adds Coulomb force to an accumulator function. Normalizes such that the potential at r_cutoff is 0.
+Parameters:
+ - t{1, 2} (int): Type (atomic number) of first and second atom.
+ - r12 (float*): Vector pointing from first atom to second atom.
+ - coulomb (NEP3::Coulomb): Used here for the value of epsilon, alpha (the damping factor),
+   and the charges of each atom type.
+ - rc_radial (float): The radial cutoff (used to normalize the potential).
+ - f12 (float*): Vector containing force of first atom on second atom.
+*/
+static __global__ void add_coulomb_force(
+  int t1,
+  int t2,
+  float* r12,
+  NEP3::Coulomb coulomb,
+  float rc_radial,
+  float* f12)
+{
+  float q1 = coulomb.charges[t1];
+  float q2 = coulomb.charges[t2];
+
+  float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+
+  float fx, fy, fz, fx_rc, fy_rc, fz_rc;
+  fx = fy = fz = fx_rc = fy_rc = fz_rc = 0;
+
+  const float sqrt_pi = sqrt(PI);
+
+  // From equation (18) of https://aip.scitation.org/doi/10.1063/1.2206581
+  // "Is Ewald Summation Still Necessary?" by Fennell and Gezelter, 2006
+  float alpha = coulomb.alpha;
+  // erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
+  // erfc(arc) / rc^2 + 2a/(pi^1/2) * exp(-(a^2 * rc^2)) / rc
+  float mag_r = (erfc(alpha * d12) / (d12 * d12) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * d12 * d12)) / d12);
+  float mag_rc = (erfc(alpha * rc_radial) / (rc_radial * rc_radial) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * rc_radial * rc_radial)) / rc_radial);
+  float coulomb_constant = 1 / (4 * PI * coulomb.epsilon);
+  float mag = q1 * q2 * (mag_r - mag_rc) * coulomb_constant;
+
+  // Add force in direction of r12
+  f12[0] += mag * r12[0] / d12;
+  f12[1] += mag * r12[1] / d12;
+  f12[2] += mag * r12[2] / d12;
+}
+
 static __global__ void find_force_radial(
   const int N,
   const int* g_NN,
   const int* g_NL,
   const NEP3::ParaMB paramb,
   const NEP3::ANN annmb,
+  const NEP3::Coulomb coulomb,
   const int* __restrict__ g_type,
   const float* __restrict__ g_x12,
   const float* __restrict__ g_y12,
@@ -440,6 +486,12 @@ static __global__ void find_force_radial(
             f12[d] += tmp12 * r12[d];
           }
         }
+      }
+
+      // Added by Michael Fatemi, 2022 November 12
+      // Integrate Coulomb force calculation with radial force function
+      if (coulomb.enabled) {
+        add_coulomb_force(t1, t2, r12, coulomb, paramb.rc_radial, f12);
       }
 
       atomicAdd(&g_fx[n1], f12[0]);
@@ -695,7 +747,7 @@ void NEP3::find_force(
   CUDA_CHECK_KERNEL
 
   find_force_radial<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, annmb,
+    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, annmb, coulomb,
     dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
     nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
