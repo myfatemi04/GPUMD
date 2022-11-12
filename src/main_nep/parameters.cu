@@ -63,6 +63,7 @@ void Parameters::set_default_parameters()
   is_generation_set = false;
   is_type_weight_set = false;
   is_zbl_set = false;
+  is_coulomb_set = false;
   is_force_delta_set = false;
 
   version = 2;                   // default version is NEP2
@@ -327,6 +328,9 @@ void Parameters::parse_one_keyword(char** param, int num_param)
     parse_force_delta(param, num_param);
   } else if (strcmp(param[0], "zbl") == 0) {
     parse_zbl(param, num_param);
+  // Added by Michael Fatemi, 2022 November 12
+  } else if (strcmp(param[0], "coulomb") == 0) {
+    parse_coulomb(param, num_param);
   } else {
     PRINT_KEYWORD_ERROR(param[0]);
   }
@@ -423,6 +427,38 @@ void Parameters::parse_zbl(char** param, int num_param)
     PRINT_INPUT_ERROR("outer cutoff for ZBL should >= 1.0 A.");
   } else if (zbl_rc_outer > 2.5f) {
     PRINT_INPUT_ERROR("outer cutoff for ZBL should <= 2.5 A.");
+  }
+}
+
+// Added by Michael Fatemi, 2022 November 12
+// Format for "coulomb": `coulomb (alpha) (epsilon) (charge1) (charge2) ...`
+void Parameters::parse_coulomb(char** param, int num_param)
+{
+  is_coulomb_set = true;
+  enable_coulomb = true;
+
+  if (num_param != 2 + types.size()) {
+    PRINT_INPUT_ERROR("coulomb should have (2 + num_types) parameters.\n");
+  }
+
+  double coulomb_alpha_tmp = 0.0;
+  if (!is_valid_real(param[1], &coulomb_alpha_tmp)) {
+    PRINT_INPUT_ERROR("damping factor for ZBL should be a number.\n");
+  }
+  coulomb_alpha = coulomb_alpha_tmp;
+
+  double coulomb_epsilon_tmp = 0.0;
+  if (!is_valid_real(param[2], &coulomb_epsilon_tmp)) {
+    PRINT_INPUT_ERROR("permittivity for ZBL should be a number.\n");
+  }
+  coulomb_epsilon = coulomb_epsilon_tmp;
+
+  for (int n = 0; n < types.size(); ++n) {
+    double charge_tmp = 0.0;
+    if (!is_valid_real(param[2 + n], &charge_tmp)) {
+      PRINT_INPUT_ERROR("one of the charges is not a number.\n");
+    }
+    coulomb_charges.emplace_back(charge_tmp);
   }
 }
 
