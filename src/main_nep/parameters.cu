@@ -184,6 +184,18 @@ void Parameters::report_inputs()
     printf("    (default) will not add the ZBL potential.\n");
   }
 
+  if (is_coulomb_set) {
+    printf("    (input)   will add the Coulomb potential with alpha = %g and epsilon = %g.\n", coulomb_alpha, coulomb_epsilon);
+    for (int n = 0; n < coulomb_charges.size(); n++) {
+      printf(
+        "        (input)   --> type %d (%s with Z = %d) has charge of %g in Coulomb potential.\n", n,
+        elements[n].c_str(), atomic_numbers[n], coulomb_charges[n]);
+    }
+    printf("    (input)   will add the Coulomb potential with alpha = %g and epsilon = %g.\n", coulomb_alpha, coulomb_epsilon);
+  } else {
+    printf("    (default) will not add the Coulomb potential.\n");
+  }
+
   if (is_cutoff_set) {
     printf("    (input)   radial cutoff = %g A.\n", rc_radial);
     printf("    (input)   angular cutoff = %g A.\n", rc_angular);
@@ -437,7 +449,7 @@ void Parameters::parse_coulomb(char** param, int num_param)
   is_coulomb_set = true;
   enable_coulomb = true;
 
-  if (num_param != 2 + types.size()) {
+  if (num_param != 1 + 2 + num_types) {
     PRINT_INPUT_ERROR("coulomb should have (2 + num_types) parameters.\n");
   }
 
@@ -453,9 +465,9 @@ void Parameters::parse_coulomb(char** param, int num_param)
   }
   coulomb_epsilon = coulomb_epsilon_tmp;
 
-  for (int n = 0; n < types.size(); ++n) {
+  for (int n = 0; n < num_types; ++n) {
     double charge_tmp = 0.0;
-    if (!is_valid_real(param[2 + n], &charge_tmp)) {
+    if (!is_valid_real(param[3 + n], &charge_tmp)) {
       PRINT_INPUT_ERROR("one of the charges is not a number.\n");
     }
     coulomb_charges.emplace_back(charge_tmp);

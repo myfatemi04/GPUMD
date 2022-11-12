@@ -273,6 +273,14 @@ NEP3::NEP3(
     zbl.atomic_numbers[n] = para.atomic_numbers[n];
   }
 
+  // Added by Michael Fatemi, 2022 November 12
+  coulomb.enabled = para.enable_coulomb;
+  coulomb.alpha = para.coulomb_alpha;
+  coulomb.epsilon = para.coulomb_epsilon;
+  for (int n = 0; n < para.coulomb_charges.size(); ++n) {
+    coulomb.charges[n] = para.coulomb_charges[n];
+  }
+
   nep_data.NN_radial.resize(N);
   nep_data.NN_angular.resize(N);
   nep_data.NL_radial.resize(N_times_max_NN_radial);
@@ -386,7 +394,7 @@ Parameters:
  - rc_radial (float): The radial cutoff (used to normalize the potential).
  - f12 (float*): Vector containing force of first atom on second atom.
 */
-static __global__ void add_coulomb_force(
+static __device__ void add_coulomb_force(
   int t1,
   int t2,
   float* r12,
@@ -398,9 +406,6 @@ static __global__ void add_coulomb_force(
   float q2 = coulomb.charges[t2];
 
   float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
-
-  float fx, fy, fz, fx_rc, fy_rc, fz_rc;
-  fx = fy = fz = fx_rc = fy_rc = fz_rc = 0;
 
   const float sqrt_pi = sqrt(PI);
 
@@ -414,10 +419,10 @@ static __global__ void add_coulomb_force(
   float coulomb_constant = 1 / (4 * PI * coulomb.epsilon);
   float mag = q1 * q2 * (mag_r - mag_rc) * coulomb_constant;
 
-  // Add force in direction of r12
-  f12[0] += mag * r12[0] / d12;
-  f12[1] += mag * r12[1] / d12;
-  f12[2] += mag * r12[2] / d12;
+  // Add force in direction of r21 (reverse, so positive magnitude = repulsion)
+  f12[0] += -mag * r12[0] / d12;
+  f12[1] += -mag * r12[1] / d12;
+  f12[2] += -mag * r12[2] / d12;
 }
 
 static __global__ void find_force_radial(
