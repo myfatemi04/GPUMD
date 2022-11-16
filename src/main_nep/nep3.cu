@@ -479,7 +479,7 @@ Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10
 1/r --> 9 * 1.6 / (r * epsilon)
 */
 static __device__ float _coulomb_potential_part(float r, float alpha, float epsilon) {
-  return 9 * 1.6 / (r * epsilon) * erfc(r * alpha) / r;
+  return 9 * 1.6 / (r * epsilon) * erfc(r * alpha);
 }
 
 // Added by Michael Fatemi, 2022 November 15
