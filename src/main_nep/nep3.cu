@@ -384,13 +384,33 @@ static __global__ void zero_force(const int N, float* g_fx, float* g_fy, float* 
 }
 
 // Written by Michael Fatemi, 2022 November 15
+/*
+Returns the magnitude of the force vector attributable to the Coulomb force.
+
+From equation (18) of https://aip.scitation.org/doi/10.1063/1.2206581
+"Is Ewald Summation Still Necessary?" by Fennell and Gezelter, 2006
+
+force = q_i * q_j *
+  (erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
+  - erfc(arc) / rc^2 + 2a/(pi^1/2) * exp(-(a^2 * rc^2)) / rc)
+
+erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
+
+[Deprecated:]
+If r=2ang, and eps=38, then in eV the potential energy should be 13.6/(38*2/0.52918)=0.1 eV
+1/r --> 13.6/(epsilon * r/0.52918)
+1/r^2 --> 13.6/(epsilon * r/0.52918 * r)
+
+[Revised:]
+If you work in SI units 1/4pi epsilon_0 = 9 10^9
+Electron charge q=1.6 10^-19 (to convert joule to eV, one factor of q drops out)
+ 
+Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10 =9*1.6/(2*38)=  0.19 eV
+
+1/r --> 9 * 1.6 / (r * epsilon)
+
+*/
 static __device__ float _coulomb_force_part(float r, float alpha, float epsilon) {
-  // erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
-
-  // if r=2ang, and eps=38, then in eV the potential energy should be 13.6/(38*2/0.52918)=0.1 eV
-  // 1/r --> 13.6/(epsilon * r/0.52918)
-  // 1/r^2 --> 13.6/(epsilon * r/0.52918 * r)
-
   // Apparently, this one vvv is off by a factor of two
   // return (13.6 / (epsilon * r / 0.52918 * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
   return (9 * 1.6 / (epsilon * r * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
@@ -398,7 +418,8 @@ static __device__ float _coulomb_force_part(float r, float alpha, float epsilon)
 
 // Added by Michael Fatemi, 2022 November 12
 /*
-Adds Coulomb force to an accumulator function. Normalizes such that the potential at r_cutoff is 0.
+Accumulates Coulomb force. Normalizes such that the potential at r_cutoff is 0.
+
 Parameters:
  - t{1, 2} (int): Type (atomic number) of first and second atom.
  - r12 (float*): Vector pointing from first atom to second atom.
@@ -423,15 +444,6 @@ static __device__ void add_coulomb_force(
   const float sqrt_pi = sqrt(PI);
 
   /*
-  From equation (18) of https://aip.scitation.org/doi/10.1063/1.2206581
-  "Is Ewald Summation Still Necessary?" by Fennell and Gezelter, 2006
-
-  force = 
-     erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
-   - erfc(arc) / rc^2 + 2a/(pi^1/2) * exp(-(a^2 * rc^2)) / rc
-  */
-
-  /*
   float alpha = coulomb.alpha;
   float mag_r = (erfc(alpha * d12) / (d12 * d12) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * d12 * d12)) / d12);
   float mag_rc = (erfc(alpha * rc_radial) / (rc_radial * rc_radial) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * rc_radial * rc_radial)) / rc_radial);
@@ -446,7 +458,60 @@ static __device__ void add_coulomb_force(
   f12[2] += -mag * r12[2] / d12;
 }
 
-static __global__ void find_force_radial(
+// Added by Michael Fatemi, 2022 November 15
+/*
+From equation (16) of https://aip.scitation.org/doi/10.1063/1.2206581
+"Is Ewald Summation Still Necessary?" by Fennell and Gezelter, 2006
+
+energy = q_i * q_j * (erfc(ar) / r - erfc(arc) / rc)
+
+[Deprecated:]
+If r=2ang, and eps=38, then in eV the potential energy should be 13.6/(38*2/0.52918)=0.1 eV
+1/r --> 13.6/(epsilon * r/0.52918)
+1/r^2 --> 13.6/(epsilon * r/0.52918 * r)
+
+[Revised:]
+If you work in SI units 1/4pi epsilon_0 = 9 10^9
+Electron charge q=1.6 10^-19 (to convert joule to eV, one factor of q drops out)
+ 
+Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10 =9*1.6/(2*38)=  0.19 eV
+
+1/r --> 9 * 1.6 / (r * epsilon)
+*/
+static __device__ float _coulomb_potential_part(float r, float alpha, float epsilon) {
+  return 9 * 1.6 / (r * epsilon) * erfc(r * alpha) / r;
+}
+
+// Added by Michael Fatemi, 2022 November 15
+/*
+Accumulates Coulomb potential. Normalizes such that the potential at r_cutoff is 0.
+
+Parameters:
+ - t{1, 2} (int): Type (atomic number) of first and second atom.
+ - r12 (float*): Vector pointing from first atom to second atom.
+ - coulomb (NEP3::Coulomb): Used here for the value of epsilon, alpha (the damping factor),
+   and the charges of each atom type.
+ - rc_radial (float): The radial cutoff (used to normalize the potential).
+ - f12 (float&): Reference to variable containing potential energy of first
+*/
+static __device__ void add_coulomb_potential(
+  int t1,
+  int t2,
+  float* r12,
+  NEP3::Coulomb coulomb,
+  float rc_radial,
+  float& energy)
+{
+  float q1 = coulomb.charges[t1];
+  float q2 = coulomb.charges[t2];
+
+  float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+
+  energy += q1 * q2 * (_coulomb_potential_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_potential_part(rc_radial, coulomb.alpha, coulomb.epsilon));
+}
+
+// Accumulates force and energy interactions
+static __global__ void accumulate_radial_interactions(
   const int N,
   const int* g_NN,
   const int* g_NL,
@@ -461,7 +526,8 @@ static __global__ void find_force_radial(
   float* g_fx,
   float* g_fy,
   float* g_fz,
-  float* g_virial)
+  float* g_virial,
+  float* g_pe)
 {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 < N) {
@@ -518,6 +584,8 @@ static __global__ void find_force_radial(
       // Integrate Coulomb force calculation with radial force function
       if (coulomb.enabled) {
         add_coulomb_force(t1, t2, r12, coulomb, paramb.rc_radial, f12);
+        // n1 refers to the current structure
+        add_coulomb_potential(t1, t2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
       }
 
       atomicAdd(&g_fx[n1], f12[0]);
@@ -772,11 +840,13 @@ void NEP3::find_force(
     dataset.force.data() + dataset.N * 2);
   CUDA_CHECK_KERNEL
 
-  find_force_radial<<<grid_size, block_size>>>(
+  accumulate_radial_interactions<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, annmb, coulomb,
     dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
     nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
-    dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
+    dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
+    // Added by Michael Fatemi, 2022 November 15, to enable us adding the Coulomb potential
+    dataset.energy.data());
   CUDA_CHECK_KERNEL
 
   find_force_angular<<<grid_size, block_size>>>(
