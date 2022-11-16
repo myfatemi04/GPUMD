@@ -383,6 +383,19 @@ static __global__ void zero_force(const int N, float* g_fx, float* g_fy, float* 
   }
 }
 
+// Written by Michael Fatemi, 2022 November 15
+static __device__ float _coulomb_force_part(float r, float alpha, float epsilon) {
+  // erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
+
+  // if r=2ang, and eps=38, then in eV the potential energy should be 13.6/(38*2/0.52918)=0.1 eV
+  // 1/r --> 13.6/(epsilon * r/0.52918)
+  // 1/r^2 --> 13.6/(epsilon * r/0.52918 * r)
+
+  // Apparently, this one vvv is off by a factor of two
+  // return (13.6 / (epsilon * r / 0.52918 * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
+  return (9 * 1.6 / (epsilon * r * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
+}
+
 // Added by Michael Fatemi, 2022 November 12
 /*
 Adds Coulomb force to an accumulator function. Normalizes such that the potential at r_cutoff is 0.
@@ -409,15 +422,23 @@ static __device__ void add_coulomb_force(
 
   const float sqrt_pi = sqrt(PI);
 
-  // From equation (18) of https://aip.scitation.org/doi/10.1063/1.2206581
-  // "Is Ewald Summation Still Necessary?" by Fennell and Gezelter, 2006
+  /*
+  From equation (18) of https://aip.scitation.org/doi/10.1063/1.2206581
+  "Is Ewald Summation Still Necessary?" by Fennell and Gezelter, 2006
+
+  force = 
+     erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
+   - erfc(arc) / rc^2 + 2a/(pi^1/2) * exp(-(a^2 * rc^2)) / rc
+  */
+
+  /*
   float alpha = coulomb.alpha;
-  // erfc(ar) / r^2 + 2a/(pi^1/2) * exp(-(a^2 * r^2)) / r
-  // erfc(arc) / rc^2 + 2a/(pi^1/2) * exp(-(a^2 * rc^2)) / rc
   float mag_r = (erfc(alpha * d12) / (d12 * d12) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * d12 * d12)) / d12);
   float mag_rc = (erfc(alpha * rc_radial) / (rc_radial * rc_radial) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * rc_radial * rc_radial)) / rc_radial);
   float coulomb_constant = 1 / (4 * PI * coulomb.epsilon);
   float mag = q1 * q2 * (mag_r - mag_rc) * coulomb_constant;
+  */
+  float mag = q1 * q2 * (_coulomb_force_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_force_part(rc_radial, coulomb.alpha, coulomb.epsilon));
 
   // Add force in direction of r21 (reverse, so positive magnitude = repulsion)
   f12[0] += -mag * r12[0] / d12;
