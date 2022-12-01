@@ -411,7 +411,6 @@ Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10
 
 */
 static __device__ float _coulomb_force_part(float r, float alpha, float epsilon) {
-  // Apparently, this one vvv is off by a factor of two
   // return (13.6 / (epsilon * r / 0.52918 * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
   return (9 * 1.6 / (epsilon * r * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
 }
@@ -441,9 +440,8 @@ static __device__ void add_coulomb_force(
 
   float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
 
-  const float sqrt_pi = sqrt(PI);
-
   /*
+  const float sqrt_pi = sqrt(PI);
   float alpha = coulomb.alpha;
   float mag_r = (erfc(alpha * d12) / (d12 * d12) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * d12 * d12)) / d12);
   float mag_rc = (erfc(alpha * rc_radial) / (rc_radial * rc_radial) + 2 * alpha / sqrt_pi * exp(-(alpha * alpha * rc_radial * rc_radial)) / rc_radial);
@@ -527,7 +525,9 @@ static __global__ void accumulate_radial_interactions(
   float* g_fy,
   float* g_fz,
   float* g_virial,
-  float* g_pe)
+  float* g_pe,
+  float* coulomb_forces
+)
 {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 < N) {
@@ -539,6 +539,7 @@ static __global__ void accumulate_radial_interactions(
     float s_virial_yz = 0.0f;
     float s_virial_zx = 0.0f;
     int t1 = g_type[n1];
+    float total_coulomb[3] = {0.0f, 0.0f, 0.0f};
     for (int i1 = 0; i1 < neighbor_number; ++i1) {
       int index = i1 * N + n1;
       int n2 = g_NL[index];
@@ -583,7 +584,13 @@ static __global__ void accumulate_radial_interactions(
       // Added by Michael Fatemi, 2022 November 12
       // Integrate Coulomb force calculation with radial force function
       if (coulomb.enabled) {
+        float fx = f12[0];
+        float fy = f12[1];
+        float fz = f12[2];
         add_coulomb_force(t1, t2, r12, coulomb, paramb.rc_radial, f12);
+        total_coulomb[0] += f12[0] - fx;
+        total_coulomb[1] += f12[1] - fy;
+        total_coulomb[2] += f12[2] - fz;
         // n1 refers to the current structure
         add_coulomb_potential(t1, t2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
       }
@@ -601,7 +608,15 @@ static __global__ void accumulate_radial_interactions(
       s_virial_xy -= r12[0] * f12[1];
       s_virial_yz -= r12[1] * f12[2];
       s_virial_zx -= r12[2] * f12[0];
+
     }
+
+    // Logged by us
+    coulomb_forces[n1] = total_coulomb[0];
+    coulomb_forces[n1 + N] = total_coulomb[1];
+    coulomb_forces[n1 + N * 2] = total_coulomb[2];
+    // coulomb_forces[n1] = sqrt((total_coulomb[0] * total_coulomb[0]) + (total_coulomb[1] * total_coulomb[1]) + (total_coulomb[2] * total_coulomb[2]));
+
     g_virial[n1] = s_virial_xx;
     g_virial[n1 + N] = s_virial_yy;
     g_virial[n1 + N * 2] = s_virial_zz;
@@ -840,13 +855,43 @@ void NEP3::find_force(
     dataset.force.data() + dataset.N * 2);
   CUDA_CHECK_KERNEL
 
+  float *dev_coulomb_forces;
+  cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N);
+
   accumulate_radial_interactions<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, annmb, coulomb,
     dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
     nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
     // Added by Michael Fatemi, 2022 November 15, to enable us adding the Coulomb potential
-    dataset.energy.data());
+    dataset.energy.data(),
+    // Added by Michael Fatemi, 2022 November 21, to enable us to calculate the effect of the Coulomb potential
+    dev_coulomb_forces
+    );
+
+  // Copy back to host
+  float *coulomb_forces = new float[dataset.N * 3];
+  float *regular_forces = new float[dataset.N * 3];
+  cudaMemcpy(coulomb_forces, dev_coulomb_forces, sizeof(float) * dataset.N * 3, cudaMemcpyDeviceToHost);
+  cudaMemcpy(regular_forces, dataset.force.data(), sizeof(float) * dataset.N * 3, cudaMemcpyDeviceToHost);
+
+  for (int i = 0; i < dataset.N; i++) {
+    float fx, fy, fz;
+    fx = regular_forces[i];
+    fy = regular_forces[i + dataset.N];
+    fz = regular_forces[i + 2 * dataset.N];
+    
+    float cx, cy, cz;
+    cx = coulomb_forces[i];
+    cy = coulomb_forces[i + dataset.N];
+    cz = coulomb_forces[i + dataset.N * 2];
+
+    printf("regular_force=<%.3f %.3f %.3f> coulomb_force=<%.3f %.3f %.3f>\n", fx, fy, fz, cx, cy, cz);
+  }
+
+  cudaFree(dev_coulomb_forces);
+  delete regular_forces;
+
   CUDA_CHECK_KERNEL
 
   find_force_angular<<<grid_size, block_size>>>(

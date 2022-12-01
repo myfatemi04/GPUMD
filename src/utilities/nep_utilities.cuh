@@ -34,6 +34,31 @@ const int MAX_DIM = MAX_NUM_N * 7;
 const int MAX_NEIGHBORS = 100; // TODO set a proper maximum value
 const int MAX_DIM_ANGULAR = MAX_NUM_N * 6;
 
+static __device__ void apply_ann_one_layer_alt(
+  const int input_dim,
+  const int output_dim,
+  const float* weight,
+  const float* bias,
+  float* input,
+  float* output,
+  float* doutput_dinput)
+{
+  for (int output_i = 0; output_i < output_dim; output_i++) {
+    float weighted_input = 0.0f;
+    for (int input_i = 0; input_i < input_dim; input_i++) {
+      weighted_input += weight[output_i * input_dim + input_i] * input[input_i];
+    }
+    float activated = tanh(weighted_input - bias[output_i]);
+    output[output_i] = activated;
+    
+    float doutput_dweighted = 1.0f - activated * activated;
+    for (int input_i = 0; input_i < input_dim; input_i++) {
+      // doutput[i]/dinput[j] = doutput[i]/dweighted_input * dweighted_input/dinput[j]
+      doutput_dinput[output_i * input_dim + input_i] = doutput_dweighted * weight[output_i * input_dim + input_i];
+    }
+  }
+}
+
 static __device__ void apply_ann_one_layer(
   const int N_des,
   const int N_neu,
