@@ -346,6 +346,33 @@ static void __global__ find_max_min(const int N, const float* g_q, float* g_q_sc
   }
 }
 
+static __global__ void apply_dnn(
+  const int N,
+  const NEP3::ParaMB paramb,
+  const NEP3::DNN dnnmb,
+  const float* __restrict__ g_descriptors,
+  const float* __restrict__ g_q_scaler,
+  float* g_pe,
+  float* g_Fp)
+{
+  int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+  if (n1 < N) {
+    // get descriptors
+    float q[MAX_DIM] = {0.0f};
+    for (int d = 0; d < annmb.dim; ++d) {
+      q[d] = g_descriptors[n1 + d * N] * g_q_scaler[d];
+    }
+    // get energy and energy gradient
+    float F = 0.0f, Fp[MAX_DIM] = {0.0f};
+    apply_ann_one_layer(
+      annmb.dim, annmb.num_neurons1, annmb.w0, annmb.b0, annmb.w1, annmb.b1, q, F, Fp);
+    g_pe[n1] = F;
+    for (int d = 0; d < annmb.dim; ++d) {
+      g_Fp[n1 + d * N] = Fp[d] * g_q_scaler[d];
+    }
+  }
+}
+
 static __global__ void apply_ann(
   const int N,
   const NEP3::ParaMB paramb,

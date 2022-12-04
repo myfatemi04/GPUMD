@@ -34,7 +34,7 @@ const int MAX_DIM = MAX_NUM_N * 7;
 const int MAX_NEIGHBORS = 100; // TODO set a proper maximum value
 const int MAX_DIM_ANGULAR = MAX_NUM_N * 6;
 
-static __device__ void apply_ann_one_layer_alt(
+static __device__ void apply_affine(
   const int input_dim,
   const int output_dim,
   const float* weight,
@@ -56,6 +56,47 @@ static __device__ void apply_ann_one_layer_alt(
       // doutput[i]/dinput[j] = doutput[i]/dweighted_input * dweighted_input/dinput[j]
       doutput_dinput[output_i * input_dim + input_i] = doutput_dweighted * weight[output_i * input_dim + input_i];
     }
+  }
+}
+
+static __device__ void apply_dnn(
+  const int n_des,
+  const int n_layers,
+  const int* topology,
+  const float** weights,
+  const float** biases,
+  float* q,
+  float& energy,
+  float* energy_derivative)
+{
+  int input_shape = n_des;
+  float** doutput_dinputs = new float*[n_layers];
+  for (int layer_i = 0; layer_i < n_layers; layer_i++) {
+    int input_size = topology[layer_i];
+    int output_size = topology[layer_i + 1];
+    doutput_dinputs[layer_i] = new float[output_size * input_size];
+    apply_affine(input_size, output_size, weights[layer_i], biases[layer_i], doutput_dinputs[layer_i]);
+  }
+
+  // Backpropagation
+  float* dout = {1.0f};
+  for (int layer_i = n_layers - 1; layer_i > 0; layer_i--) {
+    // doutput_dinput[k, j] * doutput_dinput[j, i] = doutput_dinput[k, i]
+    int input_size = topology[layer_i];
+    int output_size = topology[layer_i + 1];
+    int pre_input_size = topology[layer_i - 1];
+    float* next_dout = new float[pre_input_size];
+    for (int output_i = 0; output_i < output_size; output_i++) {
+      for (int pre_input_i = 0; pre_input_i < pre_input_size; pre_input_i++) {
+        // Sum over input_size
+        for (int input_i = 0; input_i < input_size; input_i++) {
+          next_dout[pre_input_i] += doutput_dinputs[layer_i][output_i][input_i] * doutput_dinputs[layer_i - 1][input_i][pre_input_i];
+        }
+      }
+    }
+  }
+  for (int i = 0; i < n_des; i++) {
+    energy_derivative[i] = next_dout[i];
   }
 }
 

@@ -68,6 +68,13 @@ public:
     const float* c;
   };
 
+  struct DNN {
+    int n_layers = 0;
+    int* topology;         // number of neurons in nth layer. size is n_layers + 1. n=0 is input shape, n=n_layers is 1 (energy)
+    const float** weights;
+    const float** biases;
+  }
+
   // Added by Michael Fatemi, 2022 November 12
   struct Coulomb {
     bool enabled = false;
