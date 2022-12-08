@@ -456,6 +456,9 @@ float Dataset::get_rmse_energy(float& energy_shift_per_structure, const bool use
       error_ave += error_cpu[n];
     }
   }
+  if (Nc == 0 || ((error_ave/Nc) < 0)) {
+    printf("Invalid radicand: Nc=%d error_ave/Nc=%f\n", Nc, error_ave/Nc);
+  }
   return sqrt(error_ave / Nc);
 }
 

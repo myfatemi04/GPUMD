@@ -379,18 +379,26 @@ static __device__ void apply_affine(
   // vector of size output_dim (used to return results)
   float* output,
   // vector of size (output_dim * input_dim)
-  float* doutput_dinput)
+  float* doutput_dinput,
+  bool apply_activation)
 {
   for (int output_i = 0; output_i < output_dim; output_i++) {
     float weighted_input = 0.0f;
     for (int input_i = 0; input_i < input_dim; input_i++) {
       weighted_input += weight[output_i * input_dim + input_i] * input[input_i];
     }
-    float activated = tanh(weighted_input - bias[output_i]);
-    output[output_i] = activated;
-    
-    float doutput_dweighted = 1.0f - activated * activated;
+    float doutput_dweighted;
+    if (apply_activation) {
+      float activated = tanh(weighted_input - bias[output_i]);
+      output[output_i] = activated;
+      
+      doutput_dweighted = 1.0f - activated * activated;
+    } else {
+      output[output_i] = weighted_input - bias[output_i];
+      doutput_dweighted = 1.0f;
+    }
     for (int input_i = 0; input_i < input_dim; input_i++) {
+      // doutput_dinput[output_i][input_i] = change in output_i wrt input_i
       doutput_dinput[output_i * input_dim + input_i] = doutput_dweighted * weight[output_i * input_dim + input_i];
     }
   }
@@ -405,7 +413,7 @@ static __device__ void apply_dnn_layers(
   float& energy,
   float* energy_derivative)
 {
-  float doutput_dinputs[900][3];
+  float dnext_dcurrs[3][900];
   float current[30];
   float output[30];
   for (int i = 0; i < topology[0]; i++) {
@@ -423,7 +431,8 @@ static __device__ void apply_dnn_layers(
       biases + cumulative_biases,
       current,
       output,
-      doutput_dinputs[layer_i]
+      dnext_dcurrs[layer_i], // change in layer layer_i+1 wrt layer_i
+      layer_i < n_layers - 1 - 1 // don't apply activation on last layer
     );
     for (int i = 0; i < output_size; i++) {
       current[i] = output[i];
@@ -431,32 +440,35 @@ static __device__ void apply_dnn_layers(
     cumulative_weights += input_size * output_size;
     cumulative_biases += output_size;
   }
+  energy = current[0];
 
   // Backpropagation
-  float dout[30];
-  dout[0] = 1.0f;
-  float next_dout[30];
+  float dout_dcurr[30];
+  float dout_dnext[30];
+  dout_dnext[0] = 1.0f;
   for (int layer_i = n_layers - 2; layer_i > 0; layer_i--) {
-    // doutput_dinput[k, j] * doutput_dinput[j, i] = doutput_dinput[k, i]
-    int input_size = topology[layer_i];
-    int output_size = topology[layer_i + 1];
-    int pre_input_size = topology[layer_i - 1];
-    for (int output_i = 0; output_i < output_size; output_i++) {
-      for (int pre_input_i = 0; pre_input_i < pre_input_size; pre_input_i++) {
-        // Sum over input_size
-        for (int input_i = 0; input_i < input_size; input_i++) {
-          next_dout[pre_input_i] += \
-              doutput_dinputs[layer_i][output_i * input_size + input_i]
-            * doutput_dinputs[layer_i - 1][input_i * pre_input_size + pre_input_i];
-        }
+    // dout_dprev = dcurr_dprev * dout_dcurr
+    int next_layer_i = layer_i + 1;
+    int curr_layer_i = layer_i;
+    int curr_size = topology[curr_layer_i]; // 30 at first call
+    int next_size = topology[next_layer_i]; // 1 at first call
+    float *dnext_dcurr = dnext_dcurrs[curr_layer_i];
+    for (int curr_i = 0; curr_i < curr_size; curr_i++) {
+      // dout_dcurr[i] = sum[j](dnext_dcurr[j][i] * dout_dnext[j])
+      // Sum over curr_size
+      dout_dcurr[curr_i] = 0;
+      for (int next_i = 0; next_i < next_size; next_i++) {
+        dout_dcurr[curr_i] +=
+          (dout_dnext[next_i] *
+          dnext_dcurr[next_i * curr_size + curr_i]);
       }
     }
-    for (int i = 0; i < pre_input_size; i++) {
-      dout[i] = next_dout[i];
+    for (int i = 0; i < curr_size; i++) {
+      dout_dnext[i] = dout_dcurr[i];
     }
   }
   for (int i = 0; i < topology[0]; i++) {
-    energy_derivative[i] = dout[i];
+    energy_derivative[i] = dout_dcurr[i];
   }
 }
 
@@ -1013,6 +1025,7 @@ void NEP3::find_force(
     // Added by Michael Fatemi, 2022 November 21, to enable us to calculate the effect of the Coulomb potential
     dev_coulomb_forces
     );
+  CUDA_CHECK_KERNEL
 
   // Copy back to host
   // float *coulomb_forces = new float[dataset.N * 3];
@@ -1023,7 +1036,7 @@ void NEP3::find_force(
   // cudaFree(dev_coulomb_forces);
   // delete regular_forces;
 
-  CUDA_CHECK_KERNEL
+  // CUDA_CHECK_KERNEL
 
   find_force_angular<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
