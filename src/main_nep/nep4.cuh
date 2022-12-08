@@ -12,7 +12,7 @@
     You should have received a copy of the GNU General Public License
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
-
+/*
 #pragma once
 #include "potential.cuh"
 #include "utilities/gpu_vector.cuh"
@@ -85,3 +85,4 @@ private:
   ZBL zbl;
   void update_potential(const float* parameters, ANN& ann, GNN& gnn);
 };
+*/

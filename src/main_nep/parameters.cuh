@@ -31,7 +31,8 @@ public:
   int num_types;          // number of atom types
   int population_size;    // population size for SNES
   int maximum_generation; // maximum number of generations for SNES;
-  int num_neurons1;       // number of nuerons in the 1st hidden layer (only one hidden layer)
+  int num_layers;         // number of hidden layers
+  int *num_neurons;       // number of nuerons in each hidden layer
   int basis_size_radial;  // for nep3
   int basis_size_angular; // for nep3
   int n_max_radial;       // maximum order of the radial Chebyshev polynomials
@@ -83,7 +84,7 @@ public:
   int dim_radial;                     // number of radial descriptor components
   int dim_angular;                    // number of angular descriptor components
   int number_of_variables;            // total number of parameters (NN and descriptor)
-  int number_of_variables_ann;        // number of parameters in the ANN only
+  int number_of_variables_dnn;        // number of parameters in the DNN only
   int number_of_variables_gnn;        // number of parameters in the GNN only
   int number_of_variables_descriptor; // number of parameters in the descriptor only
 

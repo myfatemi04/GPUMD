@@ -69,11 +69,16 @@ public:
   };
 
   struct DNN {
+    int num_para;
     int n_layers = 0;
     int* topology;         // number of neurons in nth layer. size is n_layers + 1. n=0 is input shape, n=n_layers is 1 (energy)
-    const float** weights;
-    const float** biases;
-  }
+    
+    int num_weights;
+    int num_biases;
+    const float* weights;
+    const float* biases;
+    const float* charges;  // charges between atoms
+  };
 
   // Added by Michael Fatemi, 2022 November 12
   struct Coulomb {
@@ -103,9 +108,9 @@ public:
 
 private:
   ParaMB paramb;
-  ANN annmb;
+  DNN dnnmb;
   NEP3_Data nep_data;
   ZBL zbl;
   Coulomb coulomb;
-  void update_potential(const float* parameters, ANN& ann);
+  void update_potential(const float* parameters, DNN& dnn);
 };

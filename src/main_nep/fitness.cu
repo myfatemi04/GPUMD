@@ -19,7 +19,7 @@ Get the fitness
 
 #include "fitness.cuh"
 #include "nep3.cuh"
-#include "nep4.cuh"
+// #include "nep4.cuh"
 #include "parameters.cuh"
 #include "structure.cuh"
 #include "utilities/error.cuh"
@@ -78,7 +78,7 @@ Fitness::Fitness(char* input_dir, Parameters& para)
     potential.reset(
       new NEP3(input_dir, para, N, N_times_max_NN_radial, N_times_max_NN_angular, para.version));
   } else if (para.version == 4) {
-    potential.reset(new NEP4(input_dir, para, N, N_times_max_NN_angular));
+    // potential.reset(new NEP4(input_dir, para, N, N_times_max_NN_angular));
   }
 
   char file_loss_out[200];
@@ -151,7 +151,7 @@ void Fitness::report_error(
     float rmse_virial_test = test_set.get_rmse_virial(false);
 
     // correct the last bias parameter in the NN
-    elite[para.number_of_variables_ann - 1] += energy_shift_per_structure;
+    elite[para.number_of_variables_dnn - 1] += energy_shift_per_structure;
 
     // re-calculate the test set
     potential->find_force(para, elite, test_set, false);
@@ -203,7 +203,12 @@ void Fitness::report_error(
       fprintf(fid_nep, "l_max %d\n", para.L_max);
     }
 
-    fprintf(fid_nep, "ANN %d %d\n", para.num_neurons1, 0);
+    fprintf(fid_nep, "DNN");
+    for (int i = 0; i < para.num_layers; i++) {
+      fprintf(fid_nep, " %d", para.num_neurons[i]);
+    }
+    fprintf(fid_nep, " %d", 0);
+    //  %d %d\n", para.num_neurons1, 0);
     for (int m = 0; m < para.number_of_variables; ++m) {
       fprintf(fid_nep, "%15.7e\n", elite[m]);
     }

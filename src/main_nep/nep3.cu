@@ -106,7 +106,7 @@ static __global__ void find_descriptors_radial(
   const int* g_NN,
   const int* g_NL,
   const NEP3::ParaMB paramb,
-  const NEP3::ANN annmb,
+  const NEP3::DNN dnnmb,
   const int* __restrict__ g_type,
   const float* __restrict__ g_x12,
   const float* __restrict__ g_y12,
@@ -134,7 +134,7 @@ static __global__ void find_descriptors_radial(
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
           float c = (paramb.num_types == 1)
                       ? 1.0f
-                      : annmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
+                      : dnnmb.charges[(n * paramb.num_types + t1) * paramb.num_types + t2];
           q[n] += fn12[n] * c;
         }
       } else {
@@ -144,7 +144,7 @@ static __global__ void find_descriptors_radial(
           for (int k = 0; k <= paramb.basis_size_radial; ++k) {
             int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2;
-            gn12 += fn12[k] * annmb.c[c_index];
+            gn12 += fn12[k] * dnnmb.charges[c_index];
           }
           q[n] += gn12;
         }
@@ -161,7 +161,7 @@ static __global__ void find_descriptors_angular(
   const int* g_NN,
   const int* g_NL,
   const NEP3::ParaMB paramb,
-  const NEP3::ANN annmb,
+  const NEP3::DNN dnnmb,
   const int* __restrict__ g_type,
   const float* __restrict__ g_x12,
   const float* __restrict__ g_y12,
@@ -193,7 +193,7 @@ static __global__ void find_descriptors_angular(
           fn *=
             (paramb.num_types == 1)
               ? 1.0f
-              : annmb.c
+              : dnnmb.charges
                   [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
           accumulate_s(d12, x12, y12, z12, fn, s);
         } else {
@@ -203,7 +203,7 @@ static __global__ void find_descriptors_angular(
           for (int k = 0; k <= paramb.basis_size_angular; ++k) {
             int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
-            gn12 += fn12[k] * annmb.c[c_index];
+            gn12 += fn12[k] * dnnmb.charges[c_index];
           }
           accumulate_s(d12, x12, y12, z12, gn12, s);
         }
@@ -242,14 +242,39 @@ NEP3::NEP3(
   paramb.rcinv_radial = 1.0f / paramb.rc_radial;
   paramb.rc_angular = para.rc_angular;
   paramb.rcinv_angular = 1.0f / paramb.rc_angular;
-  annmb.dim = para.dim;
-  annmb.num_neurons1 = para.num_neurons1;
+  // dnnmb.dim = para.dim;
+  dnnmb.n_layers = para.num_layers + 2;
+
+  // We set topology as a const variable, so we initialize it
+  // separately
+  int* topology = new int[para.num_layers + 2];
+  topology[0] = para.dim;
+  for (int i = 0; i < para.num_layers; i++) {
+    topology[i + 1] = para.num_neurons[i];
+  }
+  topology[para.num_layers + 1] = 1;
+  dnnmb.topology = topology;
+
+  int num_weights = 0;
+  int num_biases = 0;
+  for (int i = 0; i < para.num_layers + 1; i++) {
+    num_weights += dnnmb.topology[i] * dnnmb.topology[i + 1];
+    num_biases += dnnmb.topology[i + 1];
+  }
+  // // Weights that correspond to each output layer
+  // dnnmb.weights = new float[num_weights];
+  // // Biases that correspond to each output layer
+  // dnnmb.biases = new float[num_biases];
+  dnnmb.num_weights = num_weights;
+  dnnmb.num_biases = num_biases;
+  // dnnmb.num_neurons = para.num_neurons;
   paramb.num_types = para.num_types;
-  annmb.num_para = para.number_of_variables;
+  dnnmb.num_para = para.number_of_variables;
   paramb.n_max_radial = para.n_max_radial;
   paramb.n_max_angular = para.n_max_angular;
   paramb.L_max = para.L_max;
   paramb.num_L = paramb.L_max;
+  
   if (version == 3) {
     if (para.L_max_4body == 2) {
       paramb.num_L += 1;
@@ -291,19 +316,17 @@ NEP3::NEP3(
   nep_data.x12_angular.resize(N_times_max_NN_angular);
   nep_data.y12_angular.resize(N_times_max_NN_angular);
   nep_data.z12_angular.resize(N_times_max_NN_angular);
-  nep_data.descriptors.resize(N * annmb.dim);
-  nep_data.Fp.resize(N * annmb.dim);
+  nep_data.descriptors.resize(N * dnnmb.topology[0]);
+  nep_data.Fp.resize(N * dnnmb.topology[0]);
   nep_data.sum_fxyz.resize(N * (paramb.n_max_angular + 1) * NUM_OF_ABC);
-  nep_data.parameters.resize(annmb.num_para);
+  nep_data.parameters.resize(dnnmb.num_para);
 }
 
-void NEP3::update_potential(const float* parameters, ANN& ann)
+void NEP3::update_potential(const float* parameters, DNN& dnn)
 {
-  ann.w0 = parameters;
-  ann.b0 = ann.w0 + ann.num_neurons1 * ann.dim;
-  ann.w1 = ann.b0 + ann.num_neurons1;
-  ann.b1 = ann.w1 + ann.num_neurons1;
-  ann.c = ann.b1 + 1;
+  dnn.weights = parameters;
+  dnn.biases = parameters + dnn.num_weights;
+  dnn.charges = parameters + dnn.num_weights + dnn.num_biases;
 }
 
 static void __global__ find_max_min(const int N, const float* g_q, float* g_q_scaler)
@@ -346,10 +369,102 @@ static void __global__ find_max_min(const int N, const float* g_q, float* g_q_sc
   }
 }
 
+static __device__ void apply_affine(
+  const int input_dim,
+  const int output_dim,
+  const float* weight,
+  const float* bias,
+  // vector of size input_dim
+  float* input,
+  // vector of size output_dim (used to return results)
+  float* output,
+  // vector of size (output_dim * input_dim)
+  float* doutput_dinput)
+{
+  for (int output_i = 0; output_i < output_dim; output_i++) {
+    float weighted_input = 0.0f;
+    for (int input_i = 0; input_i < input_dim; input_i++) {
+      weighted_input += weight[output_i * input_dim + input_i] * input[input_i];
+    }
+    float activated = tanh(weighted_input - bias[output_i]);
+    output[output_i] = activated;
+    
+    float doutput_dweighted = 1.0f - activated * activated;
+    for (int input_i = 0; input_i < input_dim; input_i++) {
+      doutput_dinput[output_i * input_dim + input_i] = doutput_dweighted * weight[output_i * input_dim + input_i];
+    }
+  }
+}
+
+static __device__ void apply_dnn_layers(
+  const int n_layers,
+  const int* topology,
+  const float* weights,
+  const float* biases,
+  float* q,
+  float& energy,
+  float* energy_derivative)
+{
+  float doutput_dinputs[900][3];
+  float current[30];
+  float output[30];
+  for (int i = 0; i < topology[0]; i++) {
+    current[i] = q[i];
+  }
+  int cumulative_weights = 0;
+  int cumulative_biases = 0;
+  for (int layer_i = 0; layer_i < n_layers - 1; layer_i++) {
+    int input_size = topology[layer_i];
+    int output_size = topology[layer_i + 1];
+    apply_affine(
+      input_size,
+      output_size,
+      weights + cumulative_weights,
+      biases + cumulative_biases,
+      current,
+      output,
+      doutput_dinputs[layer_i]
+    );
+    for (int i = 0; i < output_size; i++) {
+      current[i] = output[i];
+    }
+    cumulative_weights += input_size * output_size;
+    cumulative_biases += output_size;
+  }
+
+  // Backpropagation
+  float dout[30];
+  dout[0] = 1.0f;
+  float next_dout[30];
+  for (int layer_i = n_layers - 2; layer_i > 0; layer_i--) {
+    // doutput_dinput[k, j] * doutput_dinput[j, i] = doutput_dinput[k, i]
+    int input_size = topology[layer_i];
+    int output_size = topology[layer_i + 1];
+    int pre_input_size = topology[layer_i - 1];
+    for (int output_i = 0; output_i < output_size; output_i++) {
+      for (int pre_input_i = 0; pre_input_i < pre_input_size; pre_input_i++) {
+        // Sum over input_size
+        for (int input_i = 0; input_i < input_size; input_i++) {
+          next_dout[pre_input_i] += \
+              doutput_dinputs[layer_i][output_i * input_size + input_i]
+            * doutput_dinputs[layer_i - 1][input_i * pre_input_size + pre_input_i];
+        }
+      }
+    }
+    for (int i = 0; i < pre_input_size; i++) {
+      dout[i] = next_dout[i];
+    }
+  }
+  for (int i = 0; i < topology[0]; i++) {
+    energy_derivative[i] = dout[i];
+  }
+}
+
 static __global__ void apply_dnn(
   const int N,
   const NEP3::ParaMB paramb,
   const NEP3::DNN dnnmb,
+  const int* dev_topology,
   const float* __restrict__ g_descriptors,
   const float* __restrict__ g_q_scaler,
   float* g_pe,
@@ -359,15 +474,14 @@ static __global__ void apply_dnn(
   if (n1 < N) {
     // get descriptors
     float q[MAX_DIM] = {0.0f};
-    for (int d = 0; d < annmb.dim; ++d) {
+    for (int d = 0; d < dev_topology[0]; ++d) {
       q[d] = g_descriptors[n1 + d * N] * g_q_scaler[d];
     }
     // get energy and energy gradient
     float F = 0.0f, Fp[MAX_DIM] = {0.0f};
-    apply_ann_one_layer(
-      annmb.dim, annmb.num_neurons1, annmb.w0, annmb.b0, annmb.w1, annmb.b1, q, F, Fp);
+    apply_dnn_layers(dnnmb.n_layers, dev_topology, dnnmb.weights, dnnmb.biases, q, F, Fp);
     g_pe[n1] = F;
-    for (int d = 0; d < annmb.dim; ++d) {
+    for (int d = 0; d < dev_topology[0]; ++d) {
       g_Fp[n1 + d * N] = Fp[d] * g_q_scaler[d];
     }
   }
@@ -541,7 +655,7 @@ static __global__ void accumulate_radial_interactions(
   const int* g_NN,
   const int* g_NL,
   const NEP3::ParaMB paramb,
-  const NEP3::ANN annmb,
+  const NEP3::DNN dnnmb,
   const NEP3::Coulomb coulomb,
   const int* __restrict__ g_type,
   const float* __restrict__ g_x12,
@@ -586,7 +700,7 @@ static __global__ void accumulate_radial_interactions(
           float tmp12 = g_Fp[n1 + n * N] * fnp12[n] * d12inv;
           tmp12 *= (paramb.num_types == 1)
                      ? 1.0f
-                     : annmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
+                     : dnnmb.charges[(n * paramb.num_types + t1) * paramb.num_types + t2];
           for (int d = 0; d < 3; ++d) {
             f12[d] += tmp12 * r12[d];
           }
@@ -599,7 +713,7 @@ static __global__ void accumulate_radial_interactions(
           for (int k = 0; k <= paramb.basis_size_radial; ++k) {
             int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2;
-            gnp12 += fnp12[k] * annmb.c[c_index];
+            gnp12 += fnp12[k] * dnnmb.charges[c_index];
           }
           float tmp12 = g_Fp[n1 + n * N] * gnp12 * d12inv;
           for (int d = 0; d < 3; ++d) {
@@ -658,7 +772,7 @@ static __global__ void find_force_angular(
   const int* g_NN,
   const int* g_NL,
   const NEP3::ParaMB paramb,
-  const NEP3::ANN annmb,
+  const NEP3::DNN dnnmb,
   const int* __restrict__ g_type,
   const float* __restrict__ g_x12,
   const float* __restrict__ g_y12,
@@ -708,7 +822,7 @@ static __global__ void find_force_angular(
           const float c =
             (paramb.num_types == 1)
               ? 1.0f
-              : annmb.c
+              : dnnmb.charges
                   [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
           fn *= c;
           fnp *= c;
@@ -725,8 +839,8 @@ static __global__ void find_force_angular(
           for (int k = 0; k <= paramb.basis_size_angular; ++k) {
             int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
-            gn12 += fn12[k] * annmb.c[c_index];
-            gnp12 += fnp12[k] * annmb.c[c_index];
+            gn12 += fn12[k] * dnnmb.charges[c_index];
+            gnp12 += fnp12[k] * dnnmb.charges[c_index];
           }
           if (paramb.num_L == paramb.L_max) {
             accumulate_f12(n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
@@ -837,7 +951,7 @@ void NEP3::find_force(
   Parameters& para, const float* parameters, Dataset& dataset, bool calculate_q_scaler)
 {
   nep_data.parameters.copy_from_host(parameters);
-  update_potential(nep_data.parameters.data(), annmb);
+  update_potential(nep_data.parameters.data(), dnnmb);
 
   float rc2_radial = para.rc_radial * para.rc_radial;
   float rc2_angular = para.rc_angular * para.rc_angular;
@@ -855,25 +969,29 @@ void NEP3::find_force(
   const int grid_size = (dataset.N - 1) / block_size + 1;
 
   find_descriptors_radial<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, annmb,
+    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, dnnmb,
     dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
     nep_data.z12_radial.data(), nep_data.descriptors.data());
   CUDA_CHECK_KERNEL
 
   find_descriptors_angular<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, annmb,
+    dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
     dataset.type.data(), nep_data.x12_angular.data(), nep_data.y12_angular.data(),
     nep_data.z12_angular.data(), nep_data.descriptors.data(), nep_data.sum_fxyz.data());
   CUDA_CHECK_KERNEL
 
   if (calculate_q_scaler) {
-    find_max_min<<<annmb.dim, 1024>>>(
+    find_max_min<<<dnnmb.topology[0], 1024>>>(
       dataset.N, nep_data.descriptors.data(), para.q_scaler_gpu.data());
     CUDA_CHECK_KERNEL
   }
 
-  apply_ann<<<grid_size, block_size>>>(
-    dataset.N, paramb, annmb, nep_data.descriptors.data(), para.q_scaler_gpu.data(),
+  int *dev_topology;
+  cudaMalloc((void**)&dev_topology, sizeof(int) * dnnmb.n_layers);
+  cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
+
+  apply_dnn<<<grid_size, block_size>>>(
+    dataset.N, paramb, dnnmb, dev_topology, nep_data.descriptors.data(), para.q_scaler_gpu.data(),
     dataset.energy.data(), nep_data.Fp.data());
   CUDA_CHECK_KERNEL
 
@@ -883,10 +1001,10 @@ void NEP3::find_force(
   CUDA_CHECK_KERNEL
 
   float *dev_coulomb_forces;
-  cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N);
+  cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N * 3);
 
   accumulate_radial_interactions<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, annmb, coulomb,
+    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, dnnmb, coulomb,
     dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
     nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
@@ -897,32 +1015,18 @@ void NEP3::find_force(
     );
 
   // Copy back to host
-  float *coulomb_forces = new float[dataset.N * 3];
-  float *regular_forces = new float[dataset.N * 3];
-  cudaMemcpy(coulomb_forces, dev_coulomb_forces, sizeof(float) * dataset.N * 3, cudaMemcpyDeviceToHost);
-  cudaMemcpy(regular_forces, dataset.force.data(), sizeof(float) * dataset.N * 3, cudaMemcpyDeviceToHost);
+  // float *coulomb_forces = new float[dataset.N * 3];
+  // float *regular_forces = new float[dataset.N * 3];
+  // cudaMemcpy(coulomb_forces, dev_coulomb_forces, sizeof(float) * dataset.N * 3, cudaMemcpyDeviceToHost);
+  // cudaMemcpy(regular_forces, dataset.force.data(), sizeof(float) * dataset.N * 3, cudaMemcpyDeviceToHost);
 
-  for (int i = 0; i < dataset.N; i++) {
-    float fx, fy, fz;
-    fx = regular_forces[i];
-    fy = regular_forces[i + dataset.N];
-    fz = regular_forces[i + 2 * dataset.N];
-    
-    float cx, cy, cz;
-    cx = coulomb_forces[i];
-    cy = coulomb_forces[i + dataset.N];
-    cz = coulomb_forces[i + dataset.N * 2];
-
-    printf("regular_force=<%.3f %.3f %.3f> coulomb_force=<%.3f %.3f %.3f>\n", fx, fy, fz, cx, cy, cz);
-  }
-
-  cudaFree(dev_coulomb_forces);
-  delete regular_forces;
+  // cudaFree(dev_coulomb_forces);
+  // delete regular_forces;
 
   CUDA_CHECK_KERNEL
 
   find_force_angular<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, annmb,
+    dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
     dataset.type.data(), nep_data.x12_angular.data(), nep_data.y12_angular.data(),
     nep_data.z12_angular.data(), nep_data.Fp.data(), nep_data.sum_fxyz.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
@@ -936,4 +1040,6 @@ void NEP3::find_force(
       dataset.virial.data(), dataset.energy.data());
     CUDA_CHECK_KERNEL
   }
+
+  cudaFree(dev_topology);
 }
