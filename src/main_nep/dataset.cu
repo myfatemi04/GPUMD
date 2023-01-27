@@ -450,6 +450,7 @@ float Dataset::get_rmse_energy(float& energy_shift_per_structure, const bool use
   CHECK(cudaMemcpy(error_cpu.data(), error_gpu.data(), mem, cudaMemcpyDeviceToHost));
   float error_ave = 0.0f;
   for (int n = 0; n < Nc; ++n) {
+    // printf("error_cpu[n] = %f\n", error_cpu[n]);
     if (use_weight) {
       error_ave += weight_cpu[n] * weight_cpu[n] * error_cpu[n];
     } else {

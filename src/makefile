@@ -26,7 +26,8 @@ else # For linux
 CFLAGS = -G -g -std=c++11 -O3 -arch=sm_35 
 endif
 INC = -I./
-LDFLAGS = -G -g
+# LDFLAGS = -G -g
+LDFLAGS =
 LIBS = -lcublas -lcusolver
 
 

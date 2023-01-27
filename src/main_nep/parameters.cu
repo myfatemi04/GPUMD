@@ -85,6 +85,7 @@ void Parameters::set_default_parameters()
   batch_size = 1000000;          // a very large number means full-batch
   population_size = 50;          // almost optimal
   maximum_generation = 100000;   // a good starting point
+  enable_coulomb = false;        // if you don't set this, you get undefined behavior.!!!!
   type_weight_cpu.resize(MAX_NUM_TYPES);
   for (int n = 0; n < MAX_NUM_TYPES; ++n) {
     type_weight_cpu[n] = {1.0f}; // uniform weight by default

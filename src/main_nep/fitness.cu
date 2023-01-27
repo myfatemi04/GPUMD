@@ -135,7 +135,7 @@ void Fitness::report_error(
   const float loss_L2,
   float* elite)
 {
-  if (0 == (generation + 1) % 100) {
+  if (0 == (generation + 1) % 10) {
     int batch_id = generation % num_batches;
 
     potential->find_force(para, elite, train_set[batch_id], false);

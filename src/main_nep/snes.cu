@@ -123,18 +123,19 @@ void SNES::compute(char* input_dir, Parameters& para, Fitness* fitness_function)
 
 void SNES::create_population(Parameters& para)
 {
+  const float LR = 1.0;
   std::normal_distribution<float> r1(0, 1);
   for (int p = 0; p < population_size; ++p) {
     for (int v = 0; v < number_of_variables; ++v) {
       int pv = p * number_of_variables + v;
       s[pv] = r1(rng);
-      population[pv] = sigma[v] * s[pv] + mu[v];
+      population[pv] = sigma[v] * s[pv] * LR + mu[v];
       // avoid zero
       if (v >= para.number_of_variables_dnn) {
         if (population[pv] > 0) {
-          population[pv] += 0.1f;
+          population[pv] += 0.1f * LR;
         } else {
-          population[pv] -= 0.1f;
+          population[pv] -= 0.1f * LR;
         }
       }
     }
@@ -204,6 +205,7 @@ void SNES::sort_population()
 
 void SNES::update_mu_and_sigma()
 {
+  const float LR = 1.0;
   for (int v = 0; v < number_of_variables; ++v) {
     float gradient_mu = 0.0f, gradient_sigma = 0.0f;
     for (int p = 0; p < population_size; ++p) {
@@ -211,7 +213,7 @@ void SNES::update_mu_and_sigma()
       gradient_mu += s[pv] * utility[p];
       gradient_sigma += (s[pv] * s[pv] - 1.0f) * utility[p];
     }
-    mu[v] += sigma[v] * gradient_mu;
+    mu[v] += sigma[v] * gradient_mu * LR;
     sigma[v] *= std::exp(eta_sigma * gradient_sigma);
   }
 }

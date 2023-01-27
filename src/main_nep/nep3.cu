@@ -29,6 +29,8 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "utilities/gpu_vector.cuh"
 #include "utilities/nep_utilities.cuh"
 
+#include <stdio.h>
+
 static __global__ void gpu_find_neighbor_list(
   const int N,
   const int* Na,
@@ -446,7 +448,7 @@ static __device__ void apply_dnn_layers(
   float dout_dcurr[30];
   float dout_dnext[30];
   dout_dnext[0] = 1.0f;
-  for (int layer_i = n_layers - 2; layer_i > 0; layer_i--) {
+  for (int layer_i = n_layers - 2; layer_i >= 0; layer_i--) {
     // dout_dprev = dcurr_dprev * dout_dcurr
     int next_layer_i = layer_i + 1;
     int curr_layer_i = layer_i;
@@ -468,7 +470,7 @@ static __device__ void apply_dnn_layers(
     }
   }
   for (int i = 0; i < topology[0]; i++) {
-    energy_derivative[i] = dout_dcurr[i];
+    energy_derivative[i] = dout_dnext[i];
   }
 }
 
