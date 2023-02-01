@@ -764,9 +764,12 @@ void Parameters::parse_population(char** param, int num_param)
     PRINT_INPUT_ERROR("population size should be an integer.\n");
   }
   if (population_size < 10) {
-    PRINT_INPUT_ERROR("population size should >= 10.");
+    printf("[warn] population size is less than 10.\n");
+    // PRINT_INPUT_ERROR("population size should >= 10.");
   } else if (population_size > 100) {
     PRINT_INPUT_ERROR("population size should <= 100.");
+  } else if (population_size < 1) {
+    PRINT_INPUT_ERROR("population size should > 0.");
   }
 }
 

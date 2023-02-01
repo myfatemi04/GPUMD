@@ -1,5 +1,5 @@
 /*
-    Copyright 2017 Zheyong Fan, Ville Vierimaa, Mikko Ervasti, and Ari Harju
+    Copyright 2023 Michael Fatemi
     This file is part of GPUMD.
     GPUMD is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -16,41 +16,30 @@
 #pragma once
 #include <random>
 #include <vector>
-
-#include "fitness.cuh"
-#include "parameters.cuh"
-
 class Fitness;
 class Fitness;
 
-class SNES
+class MetropolisMonteCarlo
 {
 public:
-  SNES(char*, Parameters&, Fitness*);
+  MetropolisMonteCarlo(char*, Parameters&, Fitness*);
 
 protected:
   std::mt19937 rng;
   int maximum_generation = 10000;
   int number_of_variables = 10;
   int population_size = 20;
-  float eta_sigma = 0.1f;
   std::vector<int> index;
   std::vector<float> fitness;
   std::vector<float> fitness_copy;
   std::vector<float> population;
   std::vector<float> population_copy;
-  std::vector<float> mu;
-  std::vector<float> sigma;
-  std::vector<float> utility;
-  std::vector<float> s;
-  std::vector<float> s_copy;
+	float acceptance_rate = 1.0f;
+	float temperature = 1.0f;
   void initialize_rng();
-  void initialize_mu_and_sigma(char*, Parameters& para);
-  void calculate_utility();
   void compute(char*, Parameters&, Fitness*);
   void create_population(Parameters&);
-  void regularize(Parameters&);
-  void sort_population();
-  void update_mu_and_sigma();
-  void output_mu_and_sigma(char*, Parameters& para);
+  void regularize(Parameters&, bool);
+  void copy_population();
+  void random_step(int dim, float step_size, float *step);
 };
