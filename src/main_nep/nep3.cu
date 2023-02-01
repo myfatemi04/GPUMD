@@ -374,52 +374,107 @@ static void __global__ find_max_min(const int N, const float* g_q, float* g_q_sc
 static __device__ void apply_affine(
   const int input_dim,
   const int output_dim,
+  float* input,
   const float* weight,
   const float* bias,
-  // vector of size input_dim
-  float* input,
-  // vector of size output_dim (used to return results)
+  // used to return results
   float* output,
-  // vector of size (output_dim * input_dim)
-  float* doutput_dinput,
-  bool apply_activation)
-{
+  bool apply_activation
+) {
   for (int output_i = 0; output_i < output_dim; output_i++) {
-    float weighted_input = 0.0f;
+    float weighted_input = 0.0f - bias[output_i];
     for (int input_i = 0; input_i < input_dim; input_i++) {
       weighted_input += weight[output_i * input_dim + input_i] * input[input_i];
     }
-    float doutput_dweighted;
     if (apply_activation) {
-      float activated = tanh(weighted_input - bias[output_i]);
-      output[output_i] = activated;
-      
-      doutput_dweighted = 1.0f - activated * activated;
+      output[output_i] = tanh(weighted_input);
     } else {
-      output[output_i] = weighted_input - bias[output_i];
-      doutput_dweighted = 1.0f;
-    }
-    for (int input_i = 0; input_i < input_dim; input_i++) {
-      // doutput_dinput[output_i][input_i] = change in output_i wrt input_i
-      doutput_dinput[output_i * input_dim + input_i] = doutput_dweighted * weight[output_i * input_dim + input_i];
+      output[output_i] = weighted_input;
     }
   }
 }
 
+static __device__ void affine_backward(
+  const int input_dim,
+  const int output_dim,
+  bool apply_activation,
+  const float* input,
+  const float* weight,
+  const float* bias,
+  const float* output,
+  const float* input_grad,
+  const float* weight_grad,
+  const float* bias_grad
+  const float* output_grad, // set by backprop
+) {
+  /*
+  output[o] = [input[i] * weight[o][i] across all i] + bias[o]
+  input_grad[i] = weight[o][i] * output_grad[o] across all outputs
+  weight_grad[o][i] = input[i] * output_grad[o]
+  bias_grad[o] = output_grad[o]
+  */
+  // atomicAdd ensures that we can do this across examples
+  // without setting bad values (such as reading A in 1,
+  // reading A in 2, writing A + X with 1, writing A + Y with 2,
+  // resulting in A + Y instead of A + X + Y)
+  for (int i = 0; i < input_dim; i++) {
+    for (int o = 0; o < output_dim; o++) {
+      atomicAdd(
+        input_grad[i],
+        weight[o * input_dim + i] * output_grad[o] *
+        (apply_activation ? (1 - output[0] * output[0]) : 1)
+      );
+    }
+  }
+  for (int i = 0; i < input_dim; i++) {
+    for (int o = 0; o < output_dim; o++) {
+      atomicAdd(
+        weight_grad[o * input_dim + i],
+        input[i] * output_grad[o] *
+        (apply_activation ? (1 - output[0] * output[0]) : 1)
+      );
+    }
+  }
+  for (int o = 0; o < output_dim; o++) {
+    atomicAdd(
+      bias_grad[o],
+      output_grad[o] * 
+      (apply_activation ? (1 - output[0] * output[0]) : 1)
+    );
+  }
+}
+
+/*
+Deep neural network function, with support for backpropagation. The "force" outputs are
+actually proxies that are used relative to the descriptors to calculate the actual force.
+The code to recover the force is written by the creators of the library and I am not familiar
+with how it works.
+
+To calculate a gradient, pass a value to `expected_output`. If you do this, the method will
+assume that you have provided an appropriately-sized `gradient` 2D pointer. This method only
+cares about loss with respect to force and energy; regularization techniques like L1 and L2
+regularization can be added manually outside of this method.
+
+This function is called in apply_dnn.
+
+apply_dnn_layers(dnnmb.n_layers, dev_topology, dnnmb.weights, dnnmb.biases, q, output, expected_output, gradient);
+*/
 static __device__ void apply_dnn_layers(
   const int n_layers,
   const int* topology,
   const float* weights,
   const float* biases,
   float* q,
-  float& energy,
-  float* energy_derivative)
-{
-  float dnext_dcurrs[3][900];
-  float current[30];
-  float output[30];
+  float* output,
+  const float* expected_output,
+  // float* input_grad,
+  float* weight_grad,
+  float* bias_grad
+  // float* output_grad
+) {
+  float activations[3][30];
   for (int i = 0; i < topology[0]; i++) {
-    current[i] = q[i];
+    activations[0][i] = q[i];
   }
   int cumulative_weights = 0;
   int cumulative_biases = 0;
@@ -429,48 +484,56 @@ static __device__ void apply_dnn_layers(
     apply_affine(
       input_size,
       output_size,
+      activations[layer_i],
       weights + cumulative_weights,
       biases + cumulative_biases,
-      current,
-      output,
-      dnext_dcurrs[layer_i], // change in layer layer_i+1 wrt layer_i
-      layer_i < n_layers - 1 - 1 // don't apply activation on last layer
+      activations[layer_i + 1],
+      layer_i + 1 < n_layers - 1 // don't apply activation on last layer
     );
-    for (int i = 0; i < output_size; i++) {
-      current[i] = output[i];
-    }
     cumulative_weights += input_size * output_size;
     cumulative_biases += output_size;
   }
-  energy = current[0];
+  for (int i = 0; i < topology[n_layers - 1]; i++) {
+    output[i] = activations[n_layers - 1][i];
+  }
+
+  if (expected_output == nullptr) {
+    return;
+  }
+
+  float activation_grad[3][30];
 
   // Backpropagation
-  float dout_dcurr[30];
-  float dout_dnext[30];
-  dout_dnext[0] = 1.0f;
+  // Gradient of loss w.r.t. each output value goes here
+  float expected_energy = expected_output[0];
+
+  // Loss is 0.5 x MSE = 0.5 x (y - yhat)^2 = y - yhat.
+  int weight_grad_ptr = 0;
+  int bias_grad_ptr = 0;
+
+  activation_grad[n_layers - 1][0] = expected_energy - output[0];
+  // next 3 would be for force
+
+  // For every pair of layers, where layer_i is the earlier layer
+  // and layer_i + 1 is the next layer:
   for (int layer_i = n_layers - 2; layer_i >= 0; layer_i--) {
-    // dout_dprev = dcurr_dprev * dout_dcurr
-    int next_layer_i = layer_i + 1;
-    int curr_layer_i = layer_i;
-    int curr_size = topology[curr_layer_i]; // 30 at first call
-    int next_size = topology[next_layer_i]; // 1 at first call
-    float *dnext_dcurr = dnext_dcurrs[curr_layer_i];
-    for (int curr_i = 0; curr_i < curr_size; curr_i++) {
-      // dout_dcurr[i] = sum[j](dnext_dcurr[j][i] * dout_dnext[j])
-      // Sum over curr_size
-      dout_dcurr[curr_i] = 0;
-      for (int next_i = 0; next_i < next_size; next_i++) {
-        dout_dcurr[curr_i] +=
-          (dout_dnext[next_i] *
-          dnext_dcurr[next_i * curr_size + curr_i]);
-      }
-    }
-    for (int i = 0; i < curr_size; i++) {
-      dout_dnext[i] = dout_dcurr[i];
-    }
-  }
-  for (int i = 0; i < topology[0]; i++) {
-    energy_derivative[i] = dout_dnext[i];
+    int input_dim = topology[layer_i];
+    int output_dim = topology[layer_i + 1];
+    weight_grad_ptr -= input_dim * output_dim;
+    bias_grad_ptr -= output_dim;
+    affine_backward(
+      input_dim,
+      output_dim,
+      layer_i + 1 < n_layers - 1, // don't apply activation on last layer
+      activations[layer_i],
+      weights + cumulative_weights,
+      biases + cumulative_biases,
+      activations[layer_i + 1],
+      activation_grad[layer_i],
+      weight_grad + weight_grad_ptr,
+      bias_grad + bias_grad_ptr,
+      activation_grad[layer_i + 1],
+    );
   }
 }
 
@@ -482,7 +545,12 @@ static __global__ void apply_dnn(
   const float* __restrict__ g_descriptors,
   const float* __restrict__ g_q_scaler,
   float* g_pe,
-  float* g_Fp)
+  float* g_Fp,
+  int num_weights,
+  int num_biases,
+  const float* dev_expected_output,
+  float* dev_weight_grad,
+  float* dev_bias_grad)
 {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 < N) {
@@ -491,12 +559,23 @@ static __global__ void apply_dnn(
     for (int d = 0; d < dev_topology[0]; ++d) {
       q[d] = g_descriptors[n1 + d * N] * g_q_scaler[d];
     }
-    // get energy and energy gradient
     float F = 0.0f, Fp[MAX_DIM] = {0.0f};
-    apply_dnn_layers(dnnmb.n_layers, dev_topology, dnnmb.weights, dnnmb.biases, q, F, Fp);
-    g_pe[n1] = F;
+    float output[1];
+    apply_dnn_layers(
+      dnnmb.n_layers,
+      dev_topology,
+      dnnmb.weights,
+      dnnmb.biases,
+      q,
+      output,
+      dev_expected_output,
+      dev_weight_grad,
+      dev_bias_grad
+    );
+    g_pe[n1] = output[0];
     for (int d = 0; d < dev_topology[0]; ++d) {
-      g_Fp[n1 + d * N] = Fp[d] * g_q_scaler[d];
+      // TODO: replace with real force
+      g_Fp[n1 + d * N] = 0; // Fp[d] * g_q_scaler[d];
     }
   }
 }
@@ -962,8 +1041,11 @@ static __global__ void find_force_ZBL(
 }
 
 void NEP3::find_force(
-  Parameters& para, const float* parameters, Dataset& dataset, bool calculate_q_scaler)
-{
+  Parameters& para,
+  const float* parameters,
+  Dataset& dataset,
+  bool calculate_q_scaler
+) {
   nep_data.parameters.copy_from_host(parameters);
   update_potential(nep_data.parameters.data(), dnnmb);
 
@@ -1004,9 +1086,51 @@ void NEP3::find_force(
   cudaMalloc((void**)&dev_topology, sizeof(int) * dnnmb.n_layers);
   cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
 
+  // get energy and energy gradient
+  // float *weight_grad = new float[weight_count];
+  // float *bias_grad = new float[bias_count];
+  // float *expected_output = new float[4 * dataset.N];
+
+  float *weight_grad_dev, *bias_grad_dev, *expected_output_dev;
+  // we can share the gradient because of atomicAdd
+  cudaMalloc((void**) &weight_grad_dev, sizeof(float) * dnnmb.num_weights);
+  cudaMalloc((void**) &bias_grad_dev, sizeof(float) * dnnmb.num_biases);
+  cudaMalloc((void**) &expected_output_dev, sizeof(float) * 4 * dataset.N);
+
+  cudaMemcpy(expected_output_dev, expected_output, sizeof(float) * 4 * dataset.N, cudaMemcpyHostToDevice);
+
+  // const int N,
+  // const NEP3::ParaMB paramb,
+  // const NEP3::DNN dnnmb,
+  // const int* dev_topology,
+  // const float* __restrict__ g_descriptors,
+  // const float* __restrict__ g_q_scaler,
+  // float* g_pe,
+  // float* g_Fp,
+  // const float* dev_expected_output,
+  // float* dev_weight_grad,
+  // float* dev_bias_grad
+
+  // ** APPLY DNN ** //
   apply_dnn<<<grid_size, block_size>>>(
-    dataset.N, paramb, dnnmb, dev_topology, nep_data.descriptors.data(), para.q_scaler_gpu.data(),
-    dataset.energy.data(), nep_data.Fp.data());
+    dataset.N,
+    paramb,
+    dnnmb,
+    dev_topology,
+    nep_data.descriptors.data(),
+    para.q_scaler_gpu.data(),
+    dataset.energy.data(),
+    nep_data.Fp.data(),
+    expected_output_dev,
+    weight_grad_dev,
+    bias_grad_dev
+  );
+  CUDA_CHECK_KERNEL
+
+  cudaMemcpy(dnnmb.weight_grad, weight_grad_dev, sizeof(float) * dnnmb.num_weights, cudaMemcpyDeviceToHost);
+  cudaMemcpy(dnnmb.bias_grad, bias_grad_dev, sizeof(float) * dnnmb.num_biases, cudaMemcpyDeviceToHost);
+  cudaFree(weight_grad_dev);
+  cudaFree(bias_grad_dev);
   CUDA_CHECK_KERNEL
 
   zero_force<<<grid_size, block_size>>>(
@@ -1016,6 +1140,8 @@ void NEP3::find_force(
 
   float *dev_coulomb_forces;
   cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N * 3);
+
+  // This is where forces are accumulated
 
   accumulate_radial_interactions<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, dnnmb, coulomb,

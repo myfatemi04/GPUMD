@@ -77,6 +77,8 @@ public:
     int num_biases;
     const float* weights;
     const float* biases;
+    const float* weight_grad;
+    const float* bias_grad;
     const float* charges;  // charges between atoms
   };
 
