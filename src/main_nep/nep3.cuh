@@ -77,8 +77,6 @@ public:
     int num_biases;
     const float* weights;
     const float* biases;
-    const float* weight_grad;
-    const float* bias_grad;
     const float* charges;  // charges between atoms
   };
 
@@ -106,7 +104,7 @@ public:
     int N_times_max_NN_angular,
     int version);
   void
-  find_force(Parameters& para, const float* parameters, Dataset& dataset, bool calculate_q_scaler);
+  find_force(Parameters& para, const float* parameters, float* parameters_grad, Dataset& dataset, bool calculate_q_scaler);
 
 private:
   ParaMB paramb;

@@ -77,7 +77,7 @@ void Parameters::set_default_parameters()
   L_max_4body = 0;               // default is not to include 4body
   L_max_5body = 0;               // default is not to include 5body
   num_layers = 1;
-  num_neurons = new int[1]{50};  // large enough in most cases
+  hidden_sizes = new int[1]{50};  // large enough in most cases
   lambda_1 = lambda_2 = 5.0e-2f; // good default based on our tests
   lambda_e = lambda_f = 1.0f;    // energy and force are more important
   lambda_v = 0.1f;               // virial is less important
@@ -130,13 +130,20 @@ void Parameters::calculate_parameters()
   q_scaler_gpu.copy_from_host(q_scaler_cpu.data());
 
   // The connection between any two layers is dim0 * dim1 for weights and dim1 for bias
-  // We artificially add parameters counts for descriptors (dim) --> layer 1 (num_neurons[0])
-  // and layer n (num_neurons[num_layers - 1]) --> energy (1)
-  number_of_variables_dnn = (dim + 1) * num_neurons[0];
+  // We artificially add parameters counts for descriptors (dim) --> layer 1 (hidden_sizes[0])
+  // and layer n (hidden_sizes[num_layers - 1]) --> energy (1)
+  int num_inputs = dim;
+  int num_outputs = 4;
+  // [implicit layer 0] to layer 1 and layer n-1 to [implicit layer n]
+  number_of_weights = num_inputs * hidden_sizes[0] + hidden_sizes[num_layers - 1] * num_outputs;
+  // layer 1 and [implicit layer n]
+  number_of_biases = hidden_sizes[0] + num_outputs;
   for (int i = 0; i < num_layers - 1; i++) {
-    number_of_variables_dnn += (num_neurons[i] + 1) * num_neurons[i + 1];
+    number_of_weights += hidden_sizes[i] * hidden_sizes[i + 1];
+    number_of_biases += hidden_sizes[i + 1];
   }
-  number_of_variables_dnn += (num_neurons[num_layers - 1] + 1) * 1;
+  number_of_variables_dnn = number_of_weights + number_of_biases;
+  number_of_variables_dnn += (hidden_sizes[num_layers - 1] + 1) * 1;
   number_of_variables_gnn = dim * dim;
 
   if (version == 2) {
@@ -243,11 +250,11 @@ void Parameters::report_inputs()
   if (is_neuron_set) {
     printf("    (input)   number of neurons = [");
     for (int i = 0; i < num_layers; i++) {
-      printf(" %d", num_neurons[i]);
+      printf(" %d", hidden_sizes[i]);
     }
     printf("].\n");
   } else {
-    printf("    (default) number of neurons = [ %d].\n", num_neurons[0]);
+    printf("    (default) number of neurons = [ %d].\n", hidden_sizes[0]);
   }
 
   if (is_lambda_1_set) {
@@ -311,7 +318,7 @@ void Parameters::report_inputs()
   printf("    total number of  descriptor components = %d.\n", dim);
   printf("    NN architecture = %d-", dim);
   for (int i = 0; i < num_layers; i++) {
-    printf("%d-", num_neurons[i]);
+    printf("%d-", hidden_sizes[i]);
   }
   printf("1.\n");
   printf("    number of NN parameters to be optimized = %d.\n", number_of_variables_dnn);
@@ -632,12 +639,12 @@ void Parameters::parse_neuron(char** param, int num_param)
     PRINT_INPUT_ERROR("neuron should have at least 1 parameter.\n");
   }
   num_layers = num_param - 1;
-  num_neurons = new int[num_layers];
+  hidden_sizes = new int[num_layers];
   for (int i = 0; i < num_layers; i++) {
-    if (!is_valid_int(param[1 + i], &num_neurons[i])) {
+    if (!is_valid_int(param[1 + i], &hidden_sizes[i])) {
       PRINT_INPUT_ERROR("number of neurons should be an integer.\n");
     }
-    if (num_neurons[i] < 1) {
+    if (hidden_sizes[i] < 1) {
       PRINT_INPUT_ERROR("number of neurons should >= 1.");
     }
   }

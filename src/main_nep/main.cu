@@ -17,6 +17,7 @@
 #include "parameters.cuh"
 #include "snes.cuh"
 #include "mc.cuh"
+#include "sgd.cuh"
 #include "utilities/error.cuh"
 #include "utilities/main_common.cuh"
 #include <stdio.h>
@@ -56,7 +57,7 @@ int main(int argc, char* argv[])
     // For now, we'll manually override the optimization method.
     time_begin = clock();
 
-    MetropolisMonteCarlo mc(input_directory, para, &fitness);
+    SGD sgd(input_directory, para, &fitness);
 
     // SNES snes(input_directory, para, &fitness);
     time_finish = clock();

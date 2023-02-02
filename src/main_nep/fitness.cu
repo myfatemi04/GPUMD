@@ -90,18 +90,19 @@ Fitness::Fitness(char* input_dir, Parameters& para)
 Fitness::~Fitness() { fclose(fid_loss_out); }
 
 void Fitness::compute(
-  const int generation, Parameters& para, const float* population, float* fitness)
+  const int generation, Parameters& para, const float* population, float* fitness, float* population_grad)
 {
   if (generation == 0) {
     std::vector<float> dummy_solution(para.number_of_variables, 1.0f);
     for (int n = 0; n < num_batches; ++n) {
-      potential->find_force(para, dummy_solution.data(), train_set[n], true);
+      potential->find_force(para, dummy_solution.data(), nullptr, train_set[n], true);
     }
   } else {
     int batch_id = generation % num_batches;
     for (int n = 0; n < para.population_size; ++n) {
       const float* individual = population + n * para.number_of_variables;
-      potential->find_force(para, individual, train_set[batch_id], false);
+      float* individual_grad = population_grad + n * para.number_of_variables;
+      potential->find_force(para, individual, individual_grad, train_set[batch_id], false);
       float energy_shift_per_structure_not_used;
       fitness[n + 0 * para.population_size] =
         para.lambda_e *
@@ -138,14 +139,14 @@ void Fitness::report_error(
   if (0 == (generation + 1) % 10) {
     int batch_id = generation % num_batches;
 
-    potential->find_force(para, elite, train_set[batch_id], false);
+    potential->find_force(para, elite, nullptr, train_set[batch_id], false);
     float energy_shift_per_structure;
     float rmse_energy_train =
       train_set[batch_id].get_rmse_energy(energy_shift_per_structure, false);
     float rmse_force_train = train_set[batch_id].get_rmse_force(para, false);
     float rmse_virial_train = train_set[batch_id].get_rmse_virial(false);
 
-    potential->find_force(para, elite, test_set, false);
+    potential->find_force(para, elite, nullptr, test_set, false);
     float rmse_energy_test = test_set.get_rmse_energy(energy_shift_per_structure, false);
     float rmse_force_test = test_set.get_rmse_force(para, false);
     float rmse_virial_test = test_set.get_rmse_virial(false);
@@ -154,7 +155,7 @@ void Fitness::report_error(
     elite[para.number_of_variables_dnn - 1] += energy_shift_per_structure;
 
     // re-calculate the test set
-    potential->find_force(para, elite, test_set, false);
+    potential->find_force(para, elite, nullptr, test_set, false);
 
     char file_nep[200];
     strcpy(file_nep, input_dir);
@@ -205,7 +206,7 @@ void Fitness::report_error(
 
     fprintf(fid_nep, "DNN");
     for (int i = 0; i < para.num_layers; i++) {
-      fprintf(fid_nep, " %d", para.num_neurons[i]);
+      fprintf(fid_nep, " %d", para.hidden_sizes[i]);
     }
     fprintf(fid_nep, " %d", 0);
     //  %d %d\n", para.num_neurons1, 0);
@@ -267,7 +268,7 @@ void Fitness::report_error(
       FILE* fid_virial = my_fopen(file_virial, "w");
 
       for (int batch_id = 0; batch_id < num_batches; ++batch_id) {
-        potential->find_force(para, elite, train_set[batch_id], false);
+        potential->find_force(para, elite, nullptr, train_set[batch_id], false);
         update_energy_force_virial(fid_energy, fid_force, fid_virial, train_set[batch_id]);
       }
 

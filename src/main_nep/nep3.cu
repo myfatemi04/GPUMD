@@ -252,9 +252,9 @@ NEP3::NEP3(
   int* topology = new int[para.num_layers + 2];
   topology[0] = para.dim;
   for (int i = 0; i < para.num_layers; i++) {
-    topology[i + 1] = para.num_neurons[i];
+    topology[i + 1] = para.hidden_sizes[i];
   }
-  topology[para.num_layers + 1] = 1;
+  topology[para.num_layers + 1] = 4;
   dnnmb.topology = topology;
 
   int num_weights = 0;
@@ -269,7 +269,7 @@ NEP3::NEP3(
   // dnnmb.biases = new float[num_biases];
   dnnmb.num_weights = num_weights;
   dnnmb.num_biases = num_biases;
-  // dnnmb.num_neurons = para.num_neurons;
+  // dnnmb.hidden_sizes = para.hidden_sizes;
   paramb.num_types = para.num_types;
   dnnmb.num_para = para.number_of_variables;
   paramb.n_max_radial = para.n_max_radial;
@@ -329,8 +329,6 @@ void NEP3::update_potential(const float* parameters, DNN& dnn)
   dnn.weights = parameters;
   dnn.biases = parameters + dnn.num_weights;
   dnn.charges = parameters + dnn.num_weights + dnn.num_biases;
-  dnn.weight_grad = new float[dnn.num_weights];
-  dnn.bias_grad = new float[dnn.num_biases];
 }
 
 static void __global__ find_max_min(const int N, const float* g_q, float* g_q_scaler)
@@ -384,7 +382,7 @@ static __device__ void apply_affine(
   bool apply_activation
 ) {
   for (int output_i = 0; output_i < output_dim; output_i++) {
-    float weighted_input = 0.0f - bias[output_i];
+    float weighted_input = bias[output_i];
     for (int input_i = 0; input_i < input_dim; input_i++) {
       weighted_input += weight[output_i * input_dim + input_i] * input[input_i];
     }
@@ -410,6 +408,8 @@ static __device__ void affine_backward(
   float* bias_grad,
   const float* output_grad
 ) {
+  int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+
   /*
   output[o] = [input[i] * weight[o][i] across all i] + bias[o]
   input_grad[i] = weight[o][i] * output_grad[o] across all outputs
@@ -422,39 +422,35 @@ static __device__ void affine_backward(
   // resulting in A + Y instead of A + X + Y)
   for (int i = 0; i < input_dim; i++) {
     for (int o = 0; o < output_dim; o++) {
-      // atomicAdd(
-      //   &input_grad[i],
-      //   weight[o * input_dim + i] * output_grad[o] *
-      //   (apply_activation ? (1 - output[0] * output[0]) : 1)
-      // );
-      input_grad[i] +=
-        weight[o * input_dim + i] * output_grad[o] *
-        (apply_activation ? (1 - output[0] * output[0]) : 1);
+      float grad_change = weight[o * input_dim + i] * output_grad[o] *
+        (apply_activation ? (1 - output[o] * output[o]) : 1);
+
+      // atomicAdd(&input_grad[i], grad_change);
+      
+      input_grad[i] += grad_change;
     }
   }
   for (int i = 0; i < input_dim; i++) {
     for (int o = 0; o < output_dim; o++) {
-      // atomicAdd(
-      //   &weight_grad[o * input_dim + i],
-      //   input[i] * output_grad[o] *
-      //   (apply_activation ? (1 - output[0] * output[0]) : 1)
-      // );
+      float grad_change = input[i] * output_grad[o] *
+        (apply_activation ? (1 - output[o] * output[o]) : 1);
 
-      weight_grad[o * input_dim + i] +=
-        input[i] * output_grad[o] *
-        (apply_activation ? (1 - output[0] * output[0]) : 1);
+      // atomicAdd(&weight_grad[o * input_dim + i], grad_change);
+
+      weight_grad[o * input_dim + i] += grad_change;
     }
   }
   for (int o = 0; o < output_dim; o++) {
-    // atomicAdd(
-    //   &bias_grad[o],
-    //   output_grad[o] * 
-    //   (apply_activation ? (1 - output[0] * output[0]) : 1)
-    // );
+    float grad_change = output_grad[o] * 
+      (apply_activation ? (1 - output[o] * output[o]) : 1);
 
-    bias_grad[o] +=
-      output_grad[o] * 
-      (apply_activation ? (1 - output[0] * output[0]) : 1);
+    // atomicAdd(&bias_grad[o], grad_change);
+
+    if (n1 == 0 && o == 0) {
+      printf("bias_grad[0] += %f\n", grad_change);
+    }
+
+    bias_grad[o] += grad_change;
   }
 }
 
@@ -474,6 +470,7 @@ This function is called in apply_dnn.
 apply_dnn_layers(dnnmb.n_layers, dev_topology, dnnmb.weights, dnnmb.biases, q, output, expected_output, gradient);
 */
 static __device__ void apply_dnn_layers(
+  const int N,
   const int n_layers,
   const int* topology,
   const float* weights,
@@ -486,6 +483,8 @@ static __device__ void apply_dnn_layers(
   float* bias_grad
   // float* output_grad
 ) {
+  int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+  
   float activations[5][30];
   for (int i = 0; i < topology[0]; i++) {
     activations[0][i] = q[i];
@@ -507,6 +506,9 @@ static __device__ void apply_dnn_layers(
     cumulative_weights += input_size * output_size;
     cumulative_biases += output_size;
   }
+
+  __syncthreads();
+
   for (int i = 0; i < topology[n_layers - 1]; i++) {
     output[i] = activations[n_layers - 1][i];
   }
@@ -517,16 +519,45 @@ static __device__ void apply_dnn_layers(
 
   float activation_grad[5][30];
 
+  for (int i = 0; i < 5; i++) {
+    for (int j = 0; j < 30; j++) {
+      activation_grad[i][j] = 0;
+    }
+  }
+
   // Backpropagation
   // Gradient of loss w.r.t. each output value goes here
   float expected_energy = expected_output[0];
+  float expected_fx = expected_output[1];
+  float expected_fy = expected_output[2];
+  float expected_fz = expected_output[3];
 
-  // Loss is 0.5 x MSE = 0.5 x (y - yhat)^2 = y - yhat.
-  int weight_grad_ptr = 0;
-  int bias_grad_ptr = 0;
+  // Loss is 0.5 x sqrt(MSE) = 0.5 x (y - yhat)^2 = y - yhat.
+  int weight_grad_ptr = cumulative_weights;
+  int bias_grad_ptr = cumulative_biases;
 
-  activation_grad[n_layers - 1][0] = expected_energy - output[0];
-  // next 3 would be for force
+  float NF = (float) N;
+
+  // MSE
+  // activation_grad[n_layers - 1][0] = (expected_energy - output[0]) / NF;
+  // activation_grad[n_layers - 1][1] = (expected_fx - output[1]) / NF;
+  // activation_grad[n_layers - 1][2] = (expected_fy - output[2]) / NF;
+  // activation_grad[n_layers - 1][3] = (expected_fz - output[3]) / NF;
+
+  // MSE
+  float s1 = (output[0] > expected_energy) ? 1 : -1;
+  float s2 = (output[1] > expected_fx) ? 1 : -1;
+  float s3 = (output[2] > expected_fy) ? 1 : -1;
+  float s4 = (output[3] > expected_fz) ? 1 : -1;
+
+  activation_grad[n_layers - 1][0] = s1 / NF;
+  activation_grad[n_layers - 1][1] = s2 / NF;
+  activation_grad[n_layers - 1][2] = s3 / NF;
+  activation_grad[n_layers - 1][3] = s4 / NF;
+
+  if (n1 == 0) {
+    printf("pred=%f true=%f\n", output[0], expected_energy);
+  }
 
   // For every pair of layers, where layer_i is the earlier layer
   // and layer_i + 1 is the next layer:
@@ -548,7 +579,20 @@ static __device__ void apply_dnn_layers(
       bias_grad + bias_grad_ptr,
       activation_grad[layer_i + 1]
     );
+
+    __syncthreads();
+
+    if (n1 == 0) {
+      // printf("<weight_grad[%d] weight[%d]>: <%.2f %.2f>\n", layer_i, layer_i, (weight_grad + weight_grad_ptr)[0], (weights + weight_grad_ptr)[0]);
+      printf("<activation_grad[%d + 1] activation[%d + 1]>: <%f %f>\n", layer_i, layer_i, (activation_grad[layer_i + 1])[0], (activations[layer_i + 1])[0]);
+      printf("<bias_grad[%d] bias[%d]>: <%f %f>\n", layer_i, layer_i, (bias_grad + bias_grad_ptr)[0], (biases + bias_grad_ptr)[0]);
+    }
+
+    // if (n1 == 0) {
+    //   printf("activation_grad[layer_i=%d][0] = %f\n", layer_i, activation_grad[layer_i][0]);
+    // }
   }
+  // if (n1 == 0) { printf("\n"); }
 }
 
 static __global__ void apply_dnn(
@@ -566,6 +610,9 @@ static __global__ void apply_dnn(
 {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 < N) {
+    // if (n1 == 0) {
+    //   printf("N: %d\n", N);
+    // }
     // get descriptors
     float q[MAX_DIM] = {0.0f};
     for (int d = 0; d < dev_topology[0]; ++d) {
@@ -573,20 +620,21 @@ static __global__ void apply_dnn(
     }
     float output[4];
     apply_dnn_layers(
+      N,
       dnnmb.n_layers,
       dev_topology,
       dnnmb.weights,
       dnnmb.biases,
       q,
       output,
-      dev_expected_output,
+      dev_expected_output == nullptr ? nullptr : (dev_expected_output + n1 * 4),
       dev_weight_grad,
       dev_bias_grad
     );
     g_pe[n1] = output[0];
     for (int d = 0; d < dev_topology[0]; ++d) {
       // TODO: replace with real force
-      g_Fp[n1 + d * N] = 0; // Fp[d] * g_q_scaler[d];
+      g_Fp[n1 + d * N] = output[d] * g_q_scaler[d];
     }
   }
 }
@@ -1054,6 +1102,7 @@ static __global__ void find_force_ZBL(
 void NEP3::find_force(
   Parameters& para,
   const float* parameters,
+  float* parameters_grad,
   Dataset& dataset,
   bool calculate_q_scaler
 ) {
@@ -1105,12 +1154,13 @@ void NEP3::find_force(
     expected_output[i] = 3.15;
   }
 
-  float *weight_grad_dev, *bias_grad_dev, *expected_output_dev;
-  // we can share the gradient because of atomicAdd
-  cudaMalloc((void**) &weight_grad_dev, sizeof(float) * dnnmb.num_weights);
-  cudaMalloc((void**) &bias_grad_dev, sizeof(float) * dnnmb.num_biases);
-  cudaMalloc((void**) &expected_output_dev, sizeof(float) * 4 * dataset.N);
+  // we can share the gradient because of atomicAdd (TODO: make sure this actually works)
+  float *grad_dev;
+  cudaMalloc((void**) &grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
+  cudaMemset(grad_dev, 0, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
 
+  float *expected_output_dev;
+  cudaMalloc((void**) &expected_output_dev, sizeof(float) * 4 * dataset.N);
   cudaMemcpy(expected_output_dev, expected_output, sizeof(float) * 4 * dataset.N, cudaMemcpyHostToDevice);
 
   // const int N,
@@ -1136,14 +1186,27 @@ void NEP3::find_force(
     dataset.energy.data(),
     nep_data.Fp.data(),
     expected_output_dev,
-    weight_grad_dev,
-    bias_grad_dev
+    // weight gradient
+    grad_dev,
+    // bias gradient
+    grad_dev + dnnmb.num_weights
   );
+  CUDA_CHECK_KERNEL
 
-  cudaMemcpy((void *) dnnmb.weight_grad, weight_grad_dev, sizeof(float) * dnnmb.num_weights, cudaMemcpyDeviceToHost);
-  cudaMemcpy((void *) dnnmb.bias_grad, bias_grad_dev, sizeof(float) * dnnmb.num_biases, cudaMemcpyDeviceToHost);
-  cudaFree(weight_grad_dev);
-  cudaFree(bias_grad_dev);
+  if (parameters_grad) {
+    cudaMemcpy((void *) parameters_grad, grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases), cudaMemcpyDeviceToHost);
+  }
+  // cudaPointerAttributes attributes;
+  // cudaError_t err = cudaPointerGetAttributes(&attributes, grad_dev);
+  // if (attributes.devicePointer != NULL) {
+  //   printf("grad_dev is a device pointer\n");
+  // } else {
+  //   printf("grad_dev is a host pointer\n");
+  // }
+  // if (err != cudaSuccess) {
+  //   printf("Cuda error: %s\n", cudaGetErrorString(err));
+  // }
+  cudaFree(grad_dev);
   CUDA_CHECK_KERNEL
 
   zero_force<<<grid_size, block_size>>>(

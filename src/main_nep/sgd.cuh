@@ -1,5 +1,5 @@
 /*
-    Copyright 2017 Zheyong Fan, Ville Vierimaa, Mikko Ervasti, and Ari Harju
+    Copyright 2023 Michael Fatemi
     This file is part of GPUMD.
     GPUMD is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -14,15 +14,27 @@
 */
 
 #pragma once
-#include "utilities/gpu_vector.cuh"
+#include <random>
 #include <vector>
-class Dataset;
-class Parameters;
+class Fitness;
+class Fitness;
 
-class Potential
+class SGD
 {
 public:
-  virtual ~Potential() = default;
-  virtual void find_force(
-    Parameters& para, const float* parameters, float* parameters_grad, Dataset& dataset, bool calculate_q_scaler) = 0;
+  SGD(char*, Parameters&, Fitness*);
+
+protected:
+  std::mt19937 rng;
+  int maximum_generation = 10000;
+  int number_of_variables = 10;
+  const int population_size = 1;
+  std::vector<float> nn_params;
+  std::vector<float> nn_params_grad;
+  std::vector<float> fitness;
+  void init_nn(Parameters&);
+  void initialize_rng();
+  void compute(char*, Parameters&, Fitness*);
+  void regularize(Parameters&);
+  void descend(float lr);
 };
