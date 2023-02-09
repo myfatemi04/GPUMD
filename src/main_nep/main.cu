@@ -57,9 +57,9 @@ int main(int argc, char* argv[])
     // For now, we'll manually override the optimization method.
     time_begin = clock();
 
-    SGD sgd(input_directory, para, &fitness);
+    // SGD sgd(input_directory, para, &fitness);
+    SNES snes(input_directory, para, &fitness);
 
-    // SNES snes(input_directory, para, &fitness);
     time_finish = clock();
 
     time_used = (time_finish - time_begin) / float(CLOCKS_PER_SEC);

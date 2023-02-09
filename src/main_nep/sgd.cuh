@@ -28,9 +28,16 @@ protected:
   std::mt19937 rng;
   int maximum_generation = 10000;
   int number_of_variables = 10;
+  float alpha = 0.001;
+  float beta1 = 0.9;
+  float beta2 = 0.99;
+  float epsilon = 0.00000001;
   const int population_size = 1;
   std::vector<float> nn_params;
   std::vector<float> nn_params_grad;
+  // First- and second-moment estimates for Adam optimizer
+  std::vector<float> nn_params_m1;
+  std::vector<float> nn_params_m2;
   std::vector<float> fitness;
   void init_nn(Parameters&);
   void initialize_rng();

@@ -12,7 +12,7 @@
     You should have received a copy of the GNU General Public License
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
-/*
+
 #pragma once
 #include "potential.cuh"
 #include "utilities/gpu_vector.cuh"
@@ -75,7 +75,7 @@ public:
 
   NEP4(char* input_dir, Parameters& para, int N, int N_times_max_NN_angular);
   void
-  find_force(Parameters& para, const float* parameters, Dataset& dataset, bool calculate_q_scaler);
+  find_force(Parameters& para, const float* parameters, float* parameters_grad, Dataset& dataset, bool calculate_q_scaler);
 
 private:
   Para nep_para;
@@ -85,4 +85,3 @@ private:
   ZBL zbl;
   void update_potential(const float* parameters, ANN& ann, GNN& gnn);
 };
-*/

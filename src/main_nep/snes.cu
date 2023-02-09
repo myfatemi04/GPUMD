@@ -121,6 +121,18 @@ void SNES::compute(char* input_dir, Parameters& para, Fitness* fitness_function)
 
   for (int n = 0; n < maximum_generation; ++n) {
     create_population(para);
+    printf("Generation %d\n", n);
+    if (n <= 1) {
+      // Check if Coulomb interactions are enabled. If they are, then we initialize the "charge" parameters.
+      if (para.is_coulomb_set && para.enable_coulomb) {
+        for (int p = 0; p < population_size; ++p) {
+          for (int v = number_of_variables - para.num_types; v < number_of_variables; ++v) {
+            int pv = p * number_of_variables + v;
+            population[pv] = para.coulomb_charges[v];
+          }
+        }
+      }
+    }
     fitness_function->compute(n, para, population.data(), fitness.data() + 3 * population_size);
     regularize(para);
     sort_population();
@@ -128,6 +140,13 @@ void SNES::compute(char* input_dir, Parameters& para, Fitness* fitness_function)
       input_dir, para, n, fitness[0 + 0 * population_size], fitness[0 + 1 * population_size],
       fitness[0 + 2 * population_size], population.data());
     update_mu_and_sigma();
+    // Output charge
+    if (0 == (n + 1) % 10) {
+      for (int i = number_of_variables - para.num_types; i < number_of_variables; i++) {
+        float charge = population[i];
+        printf("Charge %d: %f\n", i - number_of_variables + para.num_types, charge);
+      }
+    }
     if (0 == (n + 1) % 100) {
       output_mu_and_sigma(input_dir, para);
     }

@@ -101,7 +101,7 @@ void Fitness::compute(
     int batch_id = generation % num_batches;
     for (int n = 0; n < para.population_size; ++n) {
       const float* individual = population + n * para.number_of_variables;
-      float* individual_grad = population_grad + n * para.number_of_variables;
+      float* individual_grad = (population_grad != nullptr ? (population_grad + n * para.number_of_variables) : nullptr);
       potential->find_force(para, individual, individual_grad, train_set[batch_id], false);
       float energy_shift_per_structure_not_used;
       fitness[n + 0 * para.population_size] =

@@ -30,8 +30,12 @@ SGD::SGD(char* input_dir, Parameters& para, Fitness* fitness_function)
   fitness.resize(population_size * 6);
   nn_params.resize(para.number_of_variables);
   nn_params_grad.resize(para.number_of_variables);
+  nn_params_m1.resize(para.number_of_variables);
+  nn_params_m2.resize(para.number_of_variables);
   initialize_rng();
   compute(input_dir, para, fitness_function);
+
+  beta2 = 0.75;
 }
 
 void SGD::initialize_rng()
@@ -58,20 +62,20 @@ void SGD::compute(char* input_dir, Parameters& para, Fitness* fitness_function)
 
   std::uniform_real_distribution<float> dis(0.0, 1.0);
 
-  const float lr = 0.03;
+  const float lr = 0.01;
 
   for (int n = 0; n < maximum_generation; ++n) {
+    // optim.zero_grad()
     for (int i = 0; i < number_of_variables; i++) {
       nn_params_grad[i] = 0;
     }
 
-    // Compute fitness function (and store grad)
+    // forward
     fitness_function->compute(n, para, nn_params.data(), fitness.data() + 3 * population_size, nn_params_grad.data());
-    
-    // printf("regularize")
-
     regularize(para);
-    descend(lr);
+
+    // optim.step()
+    descend(lr * 1.0 / (n + 1));
 
     fitness_function->report_error(
       input_dir, para, n, fitness[0 + 0 * population_size], fitness[0 + 1 * population_size],
@@ -81,23 +85,25 @@ void SGD::compute(char* input_dir, Parameters& para, Fitness* fitness_function)
 
 void SGD::init_nn(Parameters& para)
 {
-  // std::normal_distribution<float> r1(0, 1);
-  // for (int p = 0; p < population_size; ++p) {
-  //   for (int v = 0; v < para.number_of_weights; ++v) {
-  //     int pv = p * number_of_variables + v;
-  //     nn_params[pv] = r1(rng);
-  //   }
-  //   for (int v = 0; v < para.number_of_biases; ++v) {
-  //     int pv = p * number_of_variables + v + para.number_of_weights;
-  //     nn_params[pv] = 0;
-  //   }
+  std::normal_distribution<float> r1(0, 1);
+  for (int p = 0; p < population_size; ++p) {
+    for (int v = 0; v < para.number_of_weights; ++v) {
+      int pv = p * number_of_variables + v;
+      nn_params[pv] = r1(rng);
+      nn_params_m1[pv] = 0;
+      nn_params_m2[pv] = 0;
+    }
+    for (int v = 0; v < para.number_of_biases; ++v) {
+      int pv = p * number_of_variables + v + para.number_of_weights;
+      nn_params[pv] = 0;
+    }
+  }
+  // for (int v = 0; v < number_of_variables; ++v) {
+  //   nn_params[v] = 0;
   // }
-  for (int v = 0; v < number_of_variables; ++v) {
-    nn_params[v] = 0;
-  }
-  for (int i = 0; i < 4; i++) {
-    nn_params[para.number_of_weights + para.number_of_biases - i - 1] = 3.10;
-  }
+  // for (int i = 0; i < 4; i++) {
+  //   nn_params[para.number_of_weights + para.number_of_biases - i - 1] = 3.10;
+  // }
   // nn_params[number_of_variables - 1] = 3.15;
   // nn_params[number_of_variables - 2] = 3.15;
   // nn_params[number_of_variables - 3] = 3.15;
@@ -121,9 +127,30 @@ void SGD::descend(float lr)
   } else {
     scale_by = 1 / sqrt(grad_l2);
   }
-  printf("Running gradient descent: grad_l2 = %f\n", grad_l2);
+  // RMSProp
+  /*
+  config['cache'] = config['decay_rate'] * config['cache'] + (1 - config['decay_rate']) * (dw * dw)
+  next_w = w - config['learning_rate'] * dw / (config['epsilon'] + np.sqrt(config['cache']))
+  */
+  // Adam
+  /*
+    config['t'] += 1
+
+    config['m'] = config['beta1'] * config['m'] + (1 - config['beta1']) * dw
+    config['v'] = config['beta2'] * config['v'] + (1 - config['beta2']) * dw * dw
+
+    m_unbiased = config['m'] / (1 - config['beta1'] ** config['t'])
+    v_unbiased = config['v'] / (1 - config['beta2'] ** config['t'])
+
+    next_w = w - config['learning_rate'] * m_unbiased / (config['epsilon'] + np.sqrt(v_unbiased))
+  */
+  // printf("Running gradient descent: grad_l2 = %f\n", grad_l2);
   for (int i = 0; i < number_of_variables; i++) {
-    nn_params[i] -= nn_params_grad[i] * lr * scale_by;
+    nn_params_m1[i] = beta1 * nn_params_m1[i] + (1 - beta1) * (nn_params_grad[i] * scale_by);
+    nn_params_m2[i] = beta2 * nn_params_m2[i] + (1 - beta2) * (nn_params_grad[i] * nn_params_grad[i] * scale_by * scale_by);
+  }
+  for (int i = 0; i < number_of_variables; i++) {
+    nn_params[i] -= lr * nn_params_grad[i] * scale_by / (epsilon + sqrt(nn_params_m2[i]));
   }
 }
 
@@ -145,11 +172,15 @@ void SGD::regularize(Parameters& para)
     fitness[p + 2 * population_size] = cost_L2;
 
     // Don't apply weight decay to biases
-    // for (int i = 0; i < para.number_of_weights; i++) {
-    //   // loss += param^2 * lambda_2 + param * lambda_1
-    //   // dloss/dparam += param * lambda_2 + lambda_1
-    //   nn_params_grad[i] += 2 * nn_params[i] * para.lambda_2;
-    //   nn_params_grad[i] += 1 * para.lambda_1;
-    // }
+    for (int i = 0; i < para.number_of_weights; i++) {
+      // loss += param^2 * lambda_2 + param * lambda_1
+      // dloss/dparam += param * lambda_2 + lambda_1
+      nn_params_grad[i] += nn_params[i] * para.lambda_2;
+      if (nn_params[i] > 0) {
+        nn_params_grad[i] += 1 * para.lambda_1;
+      } else {
+        nn_params_grad[i] -= 1 * para.lambda_1;
+      }
+    }
   }
 }

@@ -254,7 +254,8 @@ NEP3::NEP3(
   for (int i = 0; i < para.num_layers; i++) {
     topology[i + 1] = para.hidden_sizes[i];
   }
-  topology[para.num_layers + 1] = 4;
+  // Output size
+  topology[para.num_layers + 1] = 1;
   dnnmb.topology = topology;
 
   int num_weights = 0;
@@ -406,9 +407,14 @@ static __device__ void affine_backward(
   float* input_grad,
   float* weight_grad,
   float* bias_grad,
-  const float* output_grad
+  const float* output_grad,
+  const float* expected_energy
 ) {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+
+  // if (n1 == 0) {
+  //   printf("output_grad[0] = %f\n", output_grad[0]);
+  // }
 
   /*
   output[o] = [input[i] * weight[o][i] across all i] + bias[o]
@@ -430,27 +436,47 @@ static __device__ void affine_backward(
       input_grad[i] += grad_change;
     }
   }
-  for (int i = 0; i < input_dim; i++) {
-    for (int o = 0; o < output_dim; o++) {
-      float grad_change = input[i] * output_grad[o] *
-        (apply_activation ? (1 - output[o] * output[o]) : 1);
+  if (weight_grad != nullptr) {
+    for (int i = 0; i < input_dim; i++) {
+      for (int o = 0; o < output_dim; o++) {
+        float grad_change = input[i] * output_grad[o] *
+          (apply_activation ? (1 - output[o] * output[o]) : 1);
 
-      // atomicAdd(&weight_grad[o * input_dim + i], grad_change);
+        atomicAdd(&weight_grad[o * input_dim + i], grad_change);
 
-      weight_grad[o * input_dim + i] += grad_change;
+        // weight_grad[o * input_dim + i] += grad_change;
+      }
     }
   }
-  for (int o = 0; o < output_dim; o++) {
-    float grad_change = output_grad[o] * 
-      (apply_activation ? (1 - output[o] * output[o]) : 1);
+  if (bias_grad != nullptr) {
+    for (int o = 0; o < output_dim; o++) {
+      float grad_change = output_grad[o] * 
+        (apply_activation ? (1 - output[o] * output[o]) : 1);
 
-    // atomicAdd(&bias_grad[o], grad_change);
+      atomicAdd(&bias_grad[o], grad_change);
 
-    if (n1 == 0 && o == 0) {
-      printf("bias_grad[0] += %f\n", grad_change);
+      // if ((grad_change < 0) && !apply_activation) {
+      //   printf("grad_change < 0; output[%d] = %f; output_grad[%d] = %f\n", o, output[o], o, output_grad[o]);
+      // }
+
+      // if (o == 0 && output_dim == 4 && output_grad[0] < 0 && output[0] != 31) {
+      //   printf("bias_grad[0] += %f; output_grad[0] = %f; output[0] = %f; expected_energy = %f\n", grad_change, output_grad[0], output[0], expected_energy[0]);
+      // }
+
+      // bias_grad[o] += grad_change;
     }
+  }
+}
 
-    bias_grad[o] += grad_change;
+static __device__ float abs_(float x) {
+  return x < 0 ? -x : x;
+}
+
+static __device__ void huber_grad(float& x) {
+  if (x > 1) {
+    x = 1;
+  } else if (x < -1) {
+    x = -1;
   }
 }
 
@@ -460,14 +486,14 @@ actually proxies that are used relative to the descriptors to calculate the actu
 The code to recover the force is written by the creators of the library and I am not familiar
 with how it works.
 
-To calculate a gradient, pass a value to `expected_output`. If you do this, the method will
+To calculate a gradient, pass a value to `energy_ref_dev`. If you do this, the method will
 assume that you have provided an appropriately-sized `gradient` 2D pointer. This method only
 cares about loss with respect to force and energy; regularization techniques like L1 and L2
 regularization can be added manually outside of this method.
 
 This function is called in apply_dnn.
 
-apply_dnn_layers(dnnmb.n_layers, dev_topology, dnnmb.weights, dnnmb.biases, q, output, expected_output, gradient);
+apply_dnn_layers(dnnmb.n_layers, dev_topology, dnnmb.weights, dnnmb.biases, q, output, energy_ref_dev, gradient);
 */
 static __device__ void apply_dnn_layers(
   const int N,
@@ -477,11 +503,9 @@ static __device__ void apply_dnn_layers(
   const float* biases,
   float* q,
   float* output,
-  const float* expected_output,
-  // float* input_grad,
-  float* weight_grad,
-  float* bias_grad
-  // float* output_grad
+  // Only contains a single value
+  const float* energy_ref,
+  float* input_grad
 ) {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   
@@ -513,7 +537,7 @@ static __device__ void apply_dnn_layers(
     output[i] = activations[n_layers - 1][i];
   }
 
-  if (expected_output == nullptr) {
+  if (energy_ref == nullptr) {
     return;
   }
 
@@ -527,10 +551,14 @@ static __device__ void apply_dnn_layers(
 
   // Backpropagation
   // Gradient of loss w.r.t. each output value goes here
-  float expected_energy = expected_output[0];
-  float expected_fx = expected_output[1];
-  float expected_fy = expected_output[2];
-  float expected_fz = expected_output[3];
+  float expected_energy = energy_ref[0];
+  // Use the real values for this later on
+  float expected_fx = 0;
+  float expected_fy = 0;
+  float expected_fz = 0;
+  // float expected_fx = expected_output[1];
+  // float expected_fy = expected_output[2];
+  // float expected_fz = expected_output[3];
 
   // Loss is 0.5 x sqrt(MSE) = 0.5 x (y - yhat)^2 = y - yhat.
   int weight_grad_ptr = cumulative_weights;
@@ -539,25 +567,35 @@ static __device__ void apply_dnn_layers(
   float NF = (float) N;
 
   // MSE
-  // activation_grad[n_layers - 1][0] = (expected_energy - output[0]) / NF;
-  // activation_grad[n_layers - 1][1] = (expected_fx - output[1]) / NF;
-  // activation_grad[n_layers - 1][2] = (expected_fy - output[2]) / NF;
-  // activation_grad[n_layers - 1][3] = (expected_fz - output[3]) / NF;
+  // activation_grad[n_layers - 1][0] = -(expected_energy - output[0]); // / NF;
+  // activation_grad[n_layers - 1][1] = -(expected_fx - output[1]); // / NF;
+  // activation_grad[n_layers - 1][2] = -(expected_fy - output[2]); // / NF;
+  // activation_grad[n_layers - 1][3] = -(expected_fz - output[3]); // / NF;
 
-  // MSE
-  float s1 = (output[0] > expected_energy) ? 1 : -1;
-  float s2 = (output[1] > expected_fx) ? 1 : -1;
-  float s3 = (output[2] > expected_fy) ? 1 : -1;
-  float s4 = (output[3] > expected_fz) ? 1 : -1;
+  // // MAE
+  // float s1 = (output[0] > expected_energy) ? 1 : -1;
+  // float s2 = (output[1] > expected_fx) ? 1 : -1;
+  // float s3 = (output[2] > expected_fy) ? 1 : -1;
+  // float s4 = (output[3] > expected_fz) ? 1 : -1;
 
-  activation_grad[n_layers - 1][0] = s1 / NF;
-  activation_grad[n_layers - 1][1] = s2 / NF;
-  activation_grad[n_layers - 1][2] = s3 / NF;
-  activation_grad[n_layers - 1][3] = s4 / NF;
+  // activation_grad[n_layers - 1][0] = s1 / NF;
+  // activation_grad[n_layers - 1][1] = s2 / NF;
+  // activation_grad[n_layers - 1][2] = s3 / NF;
+  // activation_grad[n_layers - 1][3] = s4 / NF;
 
-  if (n1 == 0) {
-    printf("pred=%f true=%f\n", output[0], expected_energy);
-  }
+  activation_grad[n_layers - 1][0] = 1;
+
+  // Huber loss (turns into MAE after a cutoff point)
+  // for (int i = 0; i < 4; i++) {
+  //   huber_grad(activation_grad[n_layers - 1][i]);
+  //   // if (n1 == 0) {
+  //   //   printf("activation_grad[%d][%d] = %f\n", n_layers - 1, i, activation_grad[n_layers - 1][i]);
+  //   // }
+  // }
+
+  // if (n1 < 10) {
+  //   printf("pred=%f true=%f grad=%f\n", output[0], expected_energy, activation_grad[n_layers - 1][0]);
+  // }
 
   // For every pair of layers, where layer_i is the earlier layer
   // and layer_i + 1 is the next layer:
@@ -566,6 +604,15 @@ static __device__ void apply_dnn_layers(
     int output_dim = topology[layer_i + 1];
     weight_grad_ptr -= input_dim * output_dim;
     bias_grad_ptr -= output_dim;
+
+    // if (n1 == 0) {
+    //   printf("<< Layer: %d >>\n", layer_i);
+    // }
+
+    // if (n1 == 0) {
+    //   printf("activation_grad[layer_i + 1][0] = %f\n", activation_grad[layer_i + 1][0]);
+    // }
+
     affine_backward(
       input_dim,
       output_dim,
@@ -575,22 +622,37 @@ static __device__ void apply_dnn_layers(
       biases + bias_grad_ptr,
       activations[layer_i + 1],
       activation_grad[layer_i],
-      weight_grad + weight_grad_ptr,
-      bias_grad + bias_grad_ptr,
-      activation_grad[layer_i + 1]
+      nullptr,
+      nullptr,
+      // weight_grad + weight_grad_ptr,
+      // bias_grad + bias_grad_ptr,
+      activation_grad[layer_i + 1],
+      energy_ref
     );
+
+    // if (n1 == 0) {
+    //   printf("activation_grad[layer_i + 1][0] = %f\n", activation_grad[layer_i + 1][0]);
+    // }
 
     __syncthreads();
 
-    if (n1 == 0) {
-      // printf("<weight_grad[%d] weight[%d]>: <%.2f %.2f>\n", layer_i, layer_i, (weight_grad + weight_grad_ptr)[0], (weights + weight_grad_ptr)[0]);
-      printf("<activation_grad[%d + 1] activation[%d + 1]>: <%f %f>\n", layer_i, layer_i, (activation_grad[layer_i + 1])[0], (activations[layer_i + 1])[0]);
-      printf("<bias_grad[%d] bias[%d]>: <%f %f>\n", layer_i, layer_i, (bias_grad + bias_grad_ptr)[0], (biases + bias_grad_ptr)[0]);
-    }
+    // if (n1 == 0) {
+    //   if (layer_i + 1 == n_layers - 1) {
+    //     printf("final activation: %f; final activation grad: %f; final activation bias: %f; final activation bias grad: %f\n", activations[n_layers - 1][0], activation_grad[n_layers - 1][0], biases[bias_grad_ptr + 0], bias_grad[bias_grad_ptr + 0]);
+    //   }
+    //   // printf("")
+    //   // printf("<weight_grad[%d][0] weight[%d][0]>: <%.2f %.2f>\n", layer_i, layer_i, (weight_grad + weight_grad_ptr)[0], (weights + weight_grad_ptr)[0]);
+    //   // printf("<activation_grad[%d + 1][0] activation[%d + 1][0]>: <%f %f>\n", layer_i, layer_i, (activation_grad[layer_i + 1])[0], (activations[layer_i + 1])[0]);
+    //   // printf("<bias_grad[%d][0] bias[%d][0]>: <%f %f>\n", layer_i, layer_i, (bias_grad + bias_grad_ptr)[0], (biases + bias_grad_ptr)[0]);
+    // }
 
     // if (n1 == 0) {
     //   printf("activation_grad[layer_i=%d][0] = %f\n", layer_i, activation_grad[layer_i][0]);
     // }
+  }
+
+  for (int i = 0; i < topology[0]; i++) {
+    input_grad[i] = activation_grad[0][i];
   }
   // if (n1 == 0) { printf("\n"); }
 }
@@ -604,7 +666,7 @@ static __global__ void apply_dnn(
   const float* __restrict__ g_q_scaler,
   float* g_pe,
   float* g_Fp,
-  const float* dev_expected_output,
+  const float* energy_ref,
   float* dev_weight_grad,
   float* dev_bias_grad)
 {
@@ -618,7 +680,8 @@ static __global__ void apply_dnn(
     for (int d = 0; d < dev_topology[0]; ++d) {
       q[d] = g_descriptors[n1 + d * N] * g_q_scaler[d];
     }
-    float output[4];
+    float g[MAX_DIM];
+    float output[1];
     apply_dnn_layers(
       N,
       dnnmb.n_layers,
@@ -627,9 +690,8 @@ static __global__ void apply_dnn(
       dnnmb.biases,
       q,
       output,
-      dev_expected_output == nullptr ? nullptr : (dev_expected_output + n1 * 4),
-      dev_weight_grad,
-      dev_bias_grad
+      energy_ref ? (&energy_ref[n1]) : nullptr,
+      g
     );
     g_pe[n1] = output[0];
     for (int d = 0; d < dev_topology[0]; ++d) {
@@ -721,16 +783,13 @@ Parameters:
  - f12 (float*): Vector containing force of first atom on second atom.
 */
 static __device__ void add_coulomb_force(
-  int t1,
-  int t2,
+  float q1,
+  float q2,
   float* r12,
   NEP3::Coulomb coulomb,
   float rc_radial,
   float* f12)
 {
-  float q1 = coulomb.charges[t1];
-  float q2 = coulomb.charges[t2];
-
   float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
 
   /*
@@ -801,6 +860,36 @@ static __device__ void add_coulomb_potential(
   energy += q1 * q2 * (_coulomb_potential_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_potential_part(rc_radial, coulomb.alpha, coulomb.epsilon));
 }
 
+static __global__ void calculate_charges(
+  const int N,
+  const int* g_NN,
+  const int* g_NL,
+  const int* __restrict__ g_type,
+  const NEP3::DNN dnnmb,
+  const int oxygen_type,
+  float* output_charges
+) {
+  int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+  if (n1 >= N) {
+    return;
+  }
+
+  int t1 = g_type[n1];
+  if (t1 != oxygen_type) {
+    output_charges[n1] = dnnmb.charges[t1];
+    return;
+  }
+  int neighbor_number = g_NN[n1];
+  float total_charge = 0;
+  for (int i = 0; i < neighbor_number; i++) {
+    int index = i * N + n1;
+    int n2 = g_NL[index];
+    int t2 = g_type[n2];
+    total_charge += dnnmb.charges[t2];
+  }
+  output_charges[n1] = -total_charge/neighbor_number;
+}
+
 // Accumulates force and energy interactions
 static __global__ void accumulate_radial_interactions(
   const int N,
@@ -819,7 +908,9 @@ static __global__ void accumulate_radial_interactions(
   float* g_fz,
   float* g_virial,
   float* g_pe,
-  float* coulomb_forces
+  float* coulomb_forces,
+  // Calculated charge of each atom
+  const float* charges
 )
 {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
@@ -880,12 +971,14 @@ static __global__ void accumulate_radial_interactions(
         float fx = f12[0];
         float fy = f12[1];
         float fz = f12[2];
-        add_coulomb_force(t1, t2, r12, coulomb, paramb.rc_radial, f12);
+        int q1 = charges[n1];
+        int q2 = charges[n2];
+        add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
         total_coulomb[0] += f12[0] - fx;
         total_coulomb[1] += f12[1] - fy;
         total_coulomb[2] += f12[2] - fz;
         // n1 refers to the current structure
-        add_coulomb_potential(t1, t2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
+        add_coulomb_potential(q1, q2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
       }
 
       atomicAdd(&g_fx[n1], f12[0]);
@@ -1136,6 +1229,31 @@ void NEP3::find_force(
     nep_data.z12_angular.data(), nep_data.descriptors.data(), nep_data.sum_fxyz.data());
   CUDA_CHECK_KERNEL
 
+  /*
+  const int N,
+  const int* g_NN,
+  const int* g_NL,
+  const int* __restrict__ g_type,
+  const NEP3::DNN dnnmb,
+  const int oxygen_type,
+  const float* output_charges
+  */
+  
+  // Calculate the charge of oxygen atoms. WARN: This assumes oxygen is a type in the dataset.
+  float *charges;
+  cudaMalloc((void**)&charges, sizeof(float) * dataset.N);
+
+  calculate_charges<<<grid_size, block_size>>>(
+    dataset.N,
+    nep_data.NN_radial.data(),
+    nep_data.NL_radial.data(),
+    dataset.type.data(),
+    dnnmb,
+    // TODO: Ensure that this matches oxygen.
+    dataset.type.size() - 1,
+    charges
+  );
+
   if (calculate_q_scaler) {
     find_max_min<<<dnnmb.topology[0], 1024>>>(
       dataset.N, nep_data.descriptors.data(), para.q_scaler_gpu.data());
@@ -1186,6 +1304,7 @@ void NEP3::find_force(
     dataset.energy.data(),
     nep_data.Fp.data(),
     expected_output_dev,
+    // dataset.energy_ref_gpu.data(),
     // weight gradient
     grad_dev,
     // bias gradient
@@ -1196,16 +1315,6 @@ void NEP3::find_force(
   if (parameters_grad) {
     cudaMemcpy((void *) parameters_grad, grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases), cudaMemcpyDeviceToHost);
   }
-  // cudaPointerAttributes attributes;
-  // cudaError_t err = cudaPointerGetAttributes(&attributes, grad_dev);
-  // if (attributes.devicePointer != NULL) {
-  //   printf("grad_dev is a device pointer\n");
-  // } else {
-  //   printf("grad_dev is a host pointer\n");
-  // }
-  // if (err != cudaSuccess) {
-  //   printf("Cuda error: %s\n", cudaGetErrorString(err));
-  // }
   cudaFree(grad_dev);
   CUDA_CHECK_KERNEL
 
@@ -1224,10 +1333,12 @@ void NEP3::find_force(
     dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
     nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
-    // Added by Michael Fatemi, 2022 November 15, to enable us adding the Coulomb potential
+    // Added 2022 November 15, to enable us adding the Coulomb potential
     dataset.energy.data(),
-    // Added by Michael Fatemi, 2022 November 21, to enable us to calculate the effect of the Coulomb potential
-    dev_coulomb_forces
+    // Added 2022 November 21, to enable us to calculate the effect of the Coulomb potential
+    dev_coulomb_forces,
+    // Added 2022 February 8, to enable us to use charges more effectively
+    charges
     );
   CUDA_CHECK_KERNEL
 

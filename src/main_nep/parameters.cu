@@ -133,7 +133,7 @@ void Parameters::calculate_parameters()
   // We artificially add parameters counts for descriptors (dim) --> layer 1 (hidden_sizes[0])
   // and layer n (hidden_sizes[num_layers - 1]) --> energy (1)
   int num_inputs = dim;
-  int num_outputs = 4;
+  int num_outputs = 1;
   // [implicit layer 0] to layer 1 and layer n-1 to [implicit layer n]
   number_of_weights = num_inputs * hidden_sizes[0] + hidden_sizes[num_layers - 1] * num_outputs;
   // layer 1 and [implicit layer n]
@@ -142,7 +142,8 @@ void Parameters::calculate_parameters()
     number_of_weights += hidden_sizes[i] * hidden_sizes[i + 1];
     number_of_biases += hidden_sizes[i + 1];
   }
-  number_of_variables_dnn = number_of_weights + number_of_biases;
+  // We also have a parameter for every atom's charge
+  number_of_variables_dnn = number_of_weights + number_of_biases + num_types;
   number_of_variables_dnn += (hidden_sizes[num_layers - 1] + 1) * 1;
   number_of_variables_gnn = dim * dim;
 
