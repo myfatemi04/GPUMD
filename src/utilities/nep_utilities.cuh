@@ -61,7 +61,7 @@ static __device__ void apply_ann_one_layer(
   energy -= b1[0];
 }
 
-static __device__ __forceinline__ void find_fc(float rc, float rcinv, float d12, float& fc)
+static __device__ __forceinline__ void find_fc(float rc, float rcinv, float d12, float& fc, bool invert = false)
 {
   if (d12 < rc) {
     float x = d12 * rcinv;
@@ -72,7 +72,7 @@ static __device__ __forceinline__ void find_fc(float rc, float rcinv, float d12,
 }
 
 static __device__ __forceinline__ void
-find_fc_and_fcp(float rc, float rcinv, float d12, float& fc, float& fcp)
+find_fc_and_fcp(float rc, float rcinv, float d12, float& fc, float& fcp, bool invert = false)
 {
   if (d12 < rc) {
     float x = d12 * rcinv;

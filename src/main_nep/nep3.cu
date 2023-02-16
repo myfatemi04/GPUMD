@@ -20,6 +20,8 @@ Combining high accuracy and low cost in atomistic simulations and application to
 heat transport, Phys. Rev. B. 104, 104309 (2021).
 ------------------------------------------------------------------------------*/
 
+#define USE_INVERTED_R true
+
 #include "dataset.cuh"
 #include "mic.cuh"
 #include "nep3.cuh"
@@ -126,9 +128,13 @@ static __global__ void find_descriptors_radial(
       float x12 = g_x12[index];
       float y12 = g_y12[index];
       float z12 = g_z12[index];
+      // CHANGE: Using 1/r instead of r
       float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
+      if (USE_INVERTED_R) {
+        d12 = 1 / d12;
+      }
       float fc12;
-      find_fc(paramb.rc_radial, paramb.rcinv_radial, d12, fc12);
+      find_fc(paramb.rc_radial, paramb.rcinv_radial, d12, fc12, USE_INVERTED_R);
       int t2 = g_type[n2];
       float fn12[MAX_NUM_N];
       if (paramb.version == 2) {
@@ -185,6 +191,7 @@ static __global__ void find_descriptors_angular(
         float x12 = g_x12[index];
         float y12 = g_y12[index];
         float z12 = g_z12[index];
+        // INVERTED_R: ignored for angular ones
         float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
         float fc12;
         find_fc(paramb.rc_angular, paramb.rcinv_angular, d12, fc12);
@@ -958,21 +965,37 @@ static __global__ void accumulate_radial_interactions(
       float fnp12[MAX_NUM_N];
       float f12[3] = {0.0f};
 
-      // Skip this for now; this way, we can focus purely on Coulomb interactions
       if (paramb.version == 2) {
-        find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
+        if (USE_INVERTED_R) {
+          find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, 1 / d12, fc12, fcp12, fn12, fnp12);
+        } else {
+          find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
+        }
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
-          float tmp12 = g_Fp[n1 + n * N] * fnp12[n] * d12inv;
+          // Change: Add chain rule for d/dr E(1/r) -> d/d(1/r) E(1/r) x d/dr 1/r
+          // Multiply by -1/r^2
+          float tmp12 = g_Fp[n1 + n * N] * fnp12[n];
+          if (USE_INVERTED_R) {
+            tmp12 *= -1/(d12 * d12);
+          }
           tmp12 *= (paramb.num_types == 1)
                      ? 1.0f
                      : dnnmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
           for (int d = 0; d < 3; ++d) {
-            f12[d] += tmp12 * r12[d];
+            f12[d] += tmp12 * (r12[d] * d12inv);
           }
         }
       } else {
-        find_fn_and_fnp(
-          paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
+        // if (n1 == 0) {
+        //   printf("1/d12: %f\n", d12inv);
+        // }
+        // Change: Use 1/r
+        if (USE_INVERTED_R) {
+          find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial, 1 / d12, fc12, fcp12, fn12, fnp12);
+        } else {
+          find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
+        }
+        // paramb.basis_size_radial, paramb.rcinv_radial, 1 / d12, fc12, fcp12, fn12, fnp12);
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
           float gnp12 = 0.0f;
           for (int k = 0; k <= paramb.basis_size_radial; ++k) {
@@ -980,11 +1003,18 @@ static __global__ void accumulate_radial_interactions(
             c_index += t1 * paramb.num_types + t2;
             gnp12 += fnp12[k] * dnnmb.c[c_index];
           }
-          float tmp12 = g_Fp[n1 + n * N] * gnp12 * d12inv;
+          // Account for chain rule, as mentioned above          
+          float tmp12 = g_Fp[n1 + n * N] * gnp12;
+          if (USE_INVERTED_R) {
+            tmp12 *= -1/(d12 * d12);
+          }
           for (int d = 0; d < 3; ++d) {
-            f12[d] += tmp12 * r12[d];
+            f12[d] += tmp12 * (r12[d] * d12inv);
           }
         }
+        // if (n1 == 0) {
+        //   printf("fx fy fz: %.3f %.3f %.3f\n", f12[0], f12[1], f12[2]);
+        // }
       }
 
       // Added by Michael Fatemi, 2022 November 12
@@ -1080,12 +1110,15 @@ static __global__ void find_force_angular(
       find_fc_and_fcp(paramb.rc_angular, paramb.rcinv_angular, d12, fc12, fcp12);
       int t2 = g_type[n2];
       float f12[3] = {0.0f};
+      // Don't use the inverted one here.
+      // Angular descriptor calculations are kinda diff.
+      float used_d12 = d12; // (USE_INVERTED_R) ? (1 / d12) : d12;
 
       if (paramb.version == 2) {
         for (int n = 0; n <= paramb.n_max_angular; ++n) {
           float fn;
           float fnp;
-          find_fn_and_fnp(n, paramb.rcinv_angular, d12, fc12, fcp12, fn, fnp);
+          find_fn_and_fnp(n, paramb.rcinv_angular, used_d12, fc12, fcp12, fn, fnp);
           const float c =
             (paramb.num_types == 1)
               ? 1.0f
@@ -1093,13 +1126,12 @@ static __global__ void find_force_angular(
                   [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
           fn *= c;
           fnp *= c;
-          accumulate_f12(n, paramb.n_max_angular + 1, d12, r12, fn, fnp, Fp, sum_fxyz, f12);
+          accumulate_f12(n, paramb.n_max_angular + 1, used_d12, r12, fn, fnp, Fp, sum_fxyz, f12);
         }
       } else {
         float fn12[MAX_NUM_N];
         float fnp12[MAX_NUM_N];
-        find_fn_and_fnp(
-          paramb.basis_size_angular, paramb.rcinv_angular, d12, fc12, fcp12, fn12, fnp12);
+        find_fn_and_fnp(paramb.basis_size_angular, paramb.rcinv_angular, used_d12, fc12, fcp12, fn12, fnp12);
         for (int n = 0; n <= paramb.n_max_angular; ++n) {
           float gn12 = 0.0f;
           float gnp12 = 0.0f;
@@ -1110,13 +1142,13 @@ static __global__ void find_force_angular(
             gnp12 += fnp12[k] * dnnmb.c[c_index];
           }
           if (paramb.num_L == paramb.L_max) {
-            accumulate_f12(n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+            accumulate_f12(n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
           } else if (paramb.num_L == paramb.L_max + 1) {
             accumulate_f12_with_4body(
-              n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+              n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
           } else {
             accumulate_f12_with_5body(
-              n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+              n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
           }
         }
       }
