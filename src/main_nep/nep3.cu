@@ -130,11 +130,8 @@ static __global__ void find_descriptors_radial(
       float z12 = g_z12[index];
       // CHANGE: Using 1/r instead of r
       float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
-      if (USE_INVERTED_R) {
-        d12 = 1 / d12;
-      }
       float fc12;
-      find_fc(paramb.rc_radial, paramb.rcinv_radial, d12, fc12, USE_INVERTED_R);
+      find_fc(paramb.rc_radial, paramb.rcinv_radial, d12, fc12);
       int t2 = g_type[n2];
       float fn12[MAX_NUM_N];
       if (paramb.version == 2) {
@@ -966,18 +963,11 @@ static __global__ void accumulate_radial_interactions(
       float f12[3] = {0.0f};
 
       if (paramb.version == 2) {
-        if (USE_INVERTED_R) {
-          find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, 1 / d12, fc12, fcp12, fn12, fnp12);
-        } else {
-          find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
-        }
+        find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
           // Change: Add chain rule for d/dr E(1/r) -> d/d(1/r) E(1/r) x d/dr 1/r
           // Multiply by -1/r^2
           float tmp12 = g_Fp[n1 + n * N] * fnp12[n];
-          if (USE_INVERTED_R) {
-            tmp12 *= -1/(d12 * d12);
-          }
           tmp12 *= (paramb.num_types == 1)
                      ? 1.0f
                      : dnnmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
@@ -986,28 +976,15 @@ static __global__ void accumulate_radial_interactions(
           }
         }
       } else {
-        // if (n1 == 0) {
-        //   printf("1/d12: %f\n", d12inv);
-        // }
-        // Change: Use 1/r
-        if (USE_INVERTED_R) {
-          find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial, 1 / d12, fc12, fcp12, fn12, fnp12);
-        } else {
-          find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
-        }
-        // paramb.basis_size_radial, paramb.rcinv_radial, 1 / d12, fc12, fcp12, fn12, fnp12);
+        find_fn_and_fnp(paramb.basis_size_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
           float gnp12 = 0.0f;
           for (int k = 0; k <= paramb.basis_size_radial; ++k) {
             int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2;
             gnp12 += fnp12[k] * dnnmb.c[c_index];
-          }
-          // Account for chain rule, as mentioned above          
+          }        
           float tmp12 = g_Fp[n1 + n * N] * gnp12;
-          if (USE_INVERTED_R) {
-            tmp12 *= -1/(d12 * d12);
-          }
           for (int d = 0; d < 3; ++d) {
             f12[d] += tmp12 * (r12[d] * d12inv);
           }
@@ -1019,19 +996,21 @@ static __global__ void accumulate_radial_interactions(
 
       // Added by Michael Fatemi, 2022 November 12
       // Integrate Coulomb force calculation with radial force function
-      // if (coulomb.enabled) {
-      //   float fx = f12[0];
-      //   float fy = f12[1];
-      //   float fz = f12[2];
-      //   int q1 = charges[n1];
-      //   int q2 = charges[n2];
-      //   add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
-      //   total_coulomb[0] += f12[0] - fx;
-      //   total_coulomb[1] += f12[1] - fy;
-      //   total_coulomb[2] += f12[2] - fz;
-      //   // n1 refers to the current structure
-      //   add_coulomb_potential(q1, q2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
-      // }
+      if (coulomb.enabled) {
+        float fx = f12[0];
+        float fy = f12[1];
+        float fz = f12[2];
+        int q1 = coulomb.charges[t1];
+        int q2 = coulomb.charges[t2];
+        // int q1 = charges[n1];
+        // int q2 = charges[n2];
+        add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
+        total_coulomb[0] += f12[0] - fx;
+        total_coulomb[1] += f12[1] - fy;
+        total_coulomb[2] += f12[2] - fz;
+        // n1 refers to the current structure
+        add_coulomb_potential(q1, q2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
+      }
 
       atomicAdd(&g_fx[n1], f12[0]);
       atomicAdd(&g_fy[n1], f12[1]);

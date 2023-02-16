@@ -61,7 +61,33 @@ static __device__ void apply_ann_one_layer(
   energy -= b1[0];
 }
 
-static __device__ __forceinline__ void find_fc(float rc, float rcinv, float d12, float& fc, bool invert = false)
+static __device__ __forceinline__ void find_fc0(float rc, float _rcinv, float d12, float& fc) {
+  // Will use a "near cutoff" of 0.1
+  float r_near = 0.1;
+  float r_far = rc;
+  if (d12 < rc) {
+    fc = (r_near * r_far) / (r_far - r_near) * (1 / d12) + r_near / (r_near - r_far);
+  } else {
+    fc = 0.0f;
+  }
+}
+
+static __device__ __forceinline__ void find_fc_and_fc0(float rc, float _rcinv, float d12, float& fc, float& fcp) {
+  // Like in find_fc, we will use a "near cutoff" of 0.1
+  // fc is the "cutoff function" (maps the distance to a number from 0 to 1)
+  // fcp is the derivative of the cutoff function with respect to the distance
+  float r_near = 0.1;
+  float r_far = rc;
+  if (d12 < rc) {
+    fc = (r_near * r_far) / (r_far - r_near) * (1 / d12) + r_near / (r_near - r_far);
+    fcp = (r_near * r_far) / (r_far - r_near) * (-1 / (d12 * d12));
+  } else {
+    fc = 0.0f;
+    fcp = 0.0f;
+  }
+}
+
+static __device__ __forceinline__ void find_fc(float rc, float rcinv, float d12, float& fc)
 {
   if (d12 < rc) {
     float x = d12 * rcinv;
@@ -72,7 +98,7 @@ static __device__ __forceinline__ void find_fc(float rc, float rcinv, float d12,
 }
 
 static __device__ __forceinline__ void
-find_fc_and_fcp(float rc, float rcinv, float d12, float& fc, float& fcp, bool invert = false)
+find_fc_and_fcp(float rc, float rcinv, float d12, float& fc, float& fcp)
 {
   if (d12 < rc) {
     float x = d12 * rcinv;
