@@ -136,146 +136,148 @@ void Fitness::report_error(
   const float loss_L2,
   float* elite)
 {
-  if (0 == (generation + 1) % 10) {
-    int batch_id = generation % num_batches;
+  // if (0 != (generation + 1) % 10) {
+  //   return;
+  // }
 
-    potential->find_force(para, elite, nullptr, train_set[batch_id], false);
-    float energy_shift_per_structure;
-    float rmse_energy_train =
-      train_set[batch_id].get_rmse_energy(energy_shift_per_structure, false);
-    float rmse_force_train = train_set[batch_id].get_rmse_force(para, false);
-    float rmse_virial_train = train_set[batch_id].get_rmse_virial(false);
+  int batch_id = generation % num_batches;
 
-    potential->find_force(para, elite, nullptr, test_set, false);
-    float rmse_energy_test = test_set.get_rmse_energy(energy_shift_per_structure, false);
-    float rmse_force_test = test_set.get_rmse_force(para, false);
-    float rmse_virial_test = test_set.get_rmse_virial(false);
+  potential->find_force(para, elite, nullptr, train_set[batch_id], false);
+  float energy_shift_per_structure;
+  float rmse_energy_train =
+    train_set[batch_id].get_rmse_energy(energy_shift_per_structure, false);
+  float rmse_force_train = train_set[batch_id].get_rmse_force(para, false);
+  float rmse_virial_train = train_set[batch_id].get_rmse_virial(false);
 
-    // correct the last bias parameter in the NN
-    elite[para.number_of_variables_dnn - 1] += energy_shift_per_structure;
+  potential->find_force(para, elite, nullptr, test_set, false);
+  float rmse_energy_test = test_set.get_rmse_energy(energy_shift_per_structure, false);
+  float rmse_force_test = test_set.get_rmse_force(para, false);
+  float rmse_virial_test = test_set.get_rmse_virial(false);
 
-    // re-calculate the test set
-    potential->find_force(para, elite, nullptr, test_set, false);
+  // correct the last bias parameter in the NN
+  elite[para.number_of_variables_dnn - 1] += energy_shift_per_structure;
 
-    char file_nep[200];
-    strcpy(file_nep, input_dir);
-    strcat(file_nep, "/nep.txt");
-    FILE* fid_nep = my_fopen(file_nep, "w");
+  // re-calculate the test set
+  potential->find_force(para, elite, nullptr, test_set, false);
 
-    if (para.version == 2) {
-      if (para.enable_zbl) {
-        fprintf(fid_nep, "nep_zbl %d ", para.num_types);
-      } else {
-        fprintf(fid_nep, "nep %d ", para.num_types);
-      }
-    } else if (para.version == 3) {
-      if (para.enable_zbl) {
-        fprintf(fid_nep, "nep3_zbl %d ", para.num_types);
-      } else {
-        fprintf(fid_nep, "nep3 %d ", para.num_types);
-      }
-    } else if (para.version == 4) {
-      if (para.enable_zbl) {
-        fprintf(fid_nep, "nep4_zbl %d ", para.num_types);
-      } else {
-        fprintf(fid_nep, "nep4 %d ", para.num_types);
-      }
-    }
+  char file_nep[200];
+  strcpy(file_nep, input_dir);
+  strcat(file_nep, "/nep.txt");
+  FILE* fid_nep = my_fopen(file_nep, "w");
 
-    for (int n = 0; n < para.num_types; ++n) {
-      fprintf(fid_nep, "%s ", para.elements[n].c_str());
-    }
-    fprintf(fid_nep, "\n");
+  if (para.version == 2) {
     if (para.enable_zbl) {
-      fprintf(fid_nep, "zbl %g %g\n", para.zbl_rc_inner, para.zbl_rc_outer);
-    }
-    if (para.version == 4) {
-      fprintf(fid_nep, "cutoff %g\n", para.rc_angular);
-      fprintf(fid_nep, "n_max %d\n", para.n_max_angular);
-      fprintf(fid_nep, "l_max %d\n", para.L_max);
-    } else if (para.version == 3) {
-      fprintf(fid_nep, "cutoff %g %g\n", para.rc_radial, para.rc_angular);
-      fprintf(fid_nep, "n_max %d %d\n", para.n_max_radial, para.n_max_angular);
-      fprintf(fid_nep, "basis_size %d %d\n", para.basis_size_radial, para.basis_size_angular);
-      fprintf(fid_nep, "l_max %d %d %d\n", para.L_max, para.L_max_4body, para.L_max_5body);
+      fprintf(fid_nep, "nep_zbl %d ", para.num_types);
     } else {
-      fprintf(fid_nep, "cutoff %g %g\n", para.rc_radial, para.rc_angular);
-      fprintf(fid_nep, "n_max %d %d\n", para.n_max_radial, para.n_max_angular);
-      fprintf(fid_nep, "l_max %d\n", para.L_max);
+      fprintf(fid_nep, "nep %d ", para.num_types);
     }
+  } else if (para.version == 3) {
+    if (para.enable_zbl) {
+      fprintf(fid_nep, "nep3_zbl %d ", para.num_types);
+    } else {
+      fprintf(fid_nep, "nep3 %d ", para.num_types);
+    }
+  } else if (para.version == 4) {
+    if (para.enable_zbl) {
+      fprintf(fid_nep, "nep4_zbl %d ", para.num_types);
+    } else {
+      fprintf(fid_nep, "nep4 %d ", para.num_types);
+    }
+  }
 
-    fprintf(fid_nep, "DNN");
-    for (int i = 0; i < para.num_layers; i++) {
-      fprintf(fid_nep, " %d", para.hidden_sizes[i]);
-    }
-    fprintf(fid_nep, " %d", 0);
-    //  %d %d\n", para.num_neurons1, 0);
-    for (int m = 0; m < para.number_of_variables; ++m) {
-      fprintf(fid_nep, "%15.7e\n", elite[m]);
-    }
-    para.q_scaler_gpu.copy_to_host(para.q_scaler_cpu.data());
-    for (int d = 0; d < para.q_scaler_cpu.size(); ++d) {
-      fprintf(fid_nep, "%15.7e\n", para.q_scaler_cpu[d]);
-    }
-    fclose(fid_nep);
+  for (int n = 0; n < para.num_types; ++n) {
+    fprintf(fid_nep, "%s ", para.elements[n].c_str());
+  }
+  fprintf(fid_nep, "\n");
+  if (para.enable_zbl) {
+    fprintf(fid_nep, "zbl %g %g\n", para.zbl_rc_inner, para.zbl_rc_outer);
+  }
+  if (para.version == 4) {
+    fprintf(fid_nep, "cutoff %g\n", para.rc_angular);
+    fprintf(fid_nep, "n_max %d\n", para.n_max_angular);
+    fprintf(fid_nep, "l_max %d\n", para.L_max);
+  } else if (para.version == 3) {
+    fprintf(fid_nep, "cutoff %g %g\n", para.rc_radial, para.rc_angular);
+    fprintf(fid_nep, "n_max %d %d\n", para.n_max_radial, para.n_max_angular);
+    fprintf(fid_nep, "basis_size %d %d\n", para.basis_size_radial, para.basis_size_angular);
+    fprintf(fid_nep, "l_max %d %d %d\n", para.L_max, para.L_max_4body, para.L_max_5body);
+  } else {
+    fprintf(fid_nep, "cutoff %g %g\n", para.rc_radial, para.rc_angular);
+    fprintf(fid_nep, "n_max %d %d\n", para.n_max_radial, para.n_max_angular);
+    fprintf(fid_nep, "l_max %d\n", para.L_max);
+  }
 
-    printf(
-      "%-8d%-11.5f%-11.5f%-11.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f\n", generation + 1,
-      loss_total, loss_L1, loss_L2, rmse_energy_train, rmse_force_train, rmse_virial_train,
-      rmse_energy_test, rmse_force_test, rmse_virial_test);
-    fflush(stdout);
-    fprintf(
-      fid_loss_out, "%-8d%-11.5f%-11.5f%-11.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f\n",
-      generation + 1, loss_total, loss_L1, loss_L2, rmse_energy_train, rmse_force_train,
-      rmse_virial_train, rmse_energy_test, rmse_force_test, rmse_virial_test);
-    fflush(fid_loss_out);
+  fprintf(fid_nep, "DNN");
+  for (int i = 0; i < para.num_layers; i++) {
+    fprintf(fid_nep, " %d", para.hidden_sizes[i]);
+  }
+  fprintf(fid_nep, " %d", 0);
+  //  %d %d\n", para.num_neurons1, 0);
+  for (int m = 0; m < para.number_of_variables; ++m) {
+    fprintf(fid_nep, "%15.7e\n", elite[m]);
+  }
+  para.q_scaler_gpu.copy_to_host(para.q_scaler_cpu.data());
+  for (int d = 0; d < para.q_scaler_cpu.size(); ++d) {
+    fprintf(fid_nep, "%15.7e\n", para.q_scaler_cpu[d]);
+  }
+  fclose(fid_nep);
 
+  printf(
+    "%-8d%-11.5f%-11.5f%-11.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f\n", generation + 1,
+    loss_total, loss_L1, loss_L2, rmse_energy_train, rmse_force_train, rmse_virial_train,
+    rmse_energy_test, rmse_force_test, rmse_virial_test);
+  fflush(stdout);
+  fprintf(
+    fid_loss_out, "%-8d%-11.5f%-11.5f%-11.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f\n",
+    generation + 1, loss_total, loss_L1, loss_L2, rmse_energy_train, rmse_force_train,
+    rmse_virial_train, rmse_energy_test, rmse_force_test, rmse_virial_test);
+  fflush(fid_loss_out);
+
+  char file_force[200];
+  strcpy(file_force, input_dir);
+  strcat(file_force, "/force_test.out");
+  FILE* fid_force = my_fopen(file_force, "w");
+
+  char file_energy[200];
+  strcpy(file_energy, input_dir);
+  strcat(file_energy, "/energy_test.out");
+  FILE* fid_energy = my_fopen(file_energy, "w");
+
+  char file_virial[200];
+  strcpy(file_virial, input_dir);
+  strcat(file_virial, "/virial_test.out");
+  FILE* fid_virial = my_fopen(file_virial, "w");
+
+  update_energy_force_virial(fid_energy, fid_force, fid_virial, test_set);
+
+  fclose(fid_energy);
+  fclose(fid_force);
+  fclose(fid_virial);
+
+  if (0 == (generation + 1) % 1000) {
     char file_force[200];
     strcpy(file_force, input_dir);
-    strcat(file_force, "/force_test.out");
+    strcat(file_force, "/force_train.out");
     FILE* fid_force = my_fopen(file_force, "w");
 
     char file_energy[200];
     strcpy(file_energy, input_dir);
-    strcat(file_energy, "/energy_test.out");
+    strcat(file_energy, "/energy_train.out");
     FILE* fid_energy = my_fopen(file_energy, "w");
 
     char file_virial[200];
     strcpy(file_virial, input_dir);
-    strcat(file_virial, "/virial_test.out");
+    strcat(file_virial, "/virial_train.out");
     FILE* fid_virial = my_fopen(file_virial, "w");
 
-    update_energy_force_virial(fid_energy, fid_force, fid_virial, test_set);
+    for (int batch_id = 0; batch_id < num_batches; ++batch_id) {
+      potential->find_force(para, elite, nullptr, train_set[batch_id], false);
+      update_energy_force_virial(fid_energy, fid_force, fid_virial, train_set[batch_id]);
+    }
 
     fclose(fid_energy);
     fclose(fid_force);
     fclose(fid_virial);
-
-    if (0 == (generation + 1) % 1000) {
-      char file_force[200];
-      strcpy(file_force, input_dir);
-      strcat(file_force, "/force_train.out");
-      FILE* fid_force = my_fopen(file_force, "w");
-
-      char file_energy[200];
-      strcpy(file_energy, input_dir);
-      strcat(file_energy, "/energy_train.out");
-      FILE* fid_energy = my_fopen(file_energy, "w");
-
-      char file_virial[200];
-      strcpy(file_virial, input_dir);
-      strcat(file_virial, "/virial_train.out");
-      FILE* fid_virial = my_fopen(file_virial, "w");
-
-      for (int batch_id = 0; batch_id < num_batches; ++batch_id) {
-        potential->find_force(para, elite, nullptr, train_set[batch_id], false);
-        update_energy_force_virial(fid_energy, fid_force, fid_virial, train_set[batch_id]);
-      }
-
-      fclose(fid_energy);
-      fclose(fid_force);
-      fclose(fid_virial);
-    }
   }
 }
 

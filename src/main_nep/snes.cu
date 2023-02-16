@@ -122,13 +122,19 @@ void SNES::compute(char* input_dir, Parameters& para, Fitness* fitness_function)
   for (int n = 0; n < maximum_generation; ++n) {
     create_population(para);
     printf("Generation %d\n", n);
-    if (n <= 1) {
+    if (1) {
       // Check if Coulomb interactions are enabled. If they are, then we initialize the "charge" parameters.
       if (para.is_coulomb_set && para.enable_coulomb) {
-        for (int p = 0; p < population_size; ++p) {
-          for (int v = number_of_variables - para.num_types; v < number_of_variables; ++v) {
+        for (int v = number_of_variables - para.num_types; v < number_of_variables; ++v) {
+          int i = v - (number_of_variables - para.num_types);
+          // Initialize the "mean" of the distribution
+          mu[v] = para.coulomb_charges[i];
+          for (int p = 0; p < population_size; ++p) {
             int pv = p * number_of_variables + v;
-            population[pv] = para.coulomb_charges[v];
+            population[pv] = para.coulomb_charges[i];
+            // if (p == 0) {
+            //   printf("Initial charges[%d] = %f = %f; v=%d\n", i, para.coulomb_charges[i], population[pv], v);
+            // }
           }
         }
       }
@@ -179,6 +185,10 @@ void SNES::regularize(Parameters& para)
   for (int p = 0; p < population_size; ++p) {
     float cost_L1 = 0.0f, cost_L2 = 0.0f;
     for (int v = 0; v < number_of_variables; ++v) {
+      // Don't regularize charges
+      if (v >= number_of_variables - para.num_types) {
+        break;
+      }
       int pv = p * number_of_variables + v;
       cost_L1 += std::abs(population[pv]);
       cost_L2 += population[pv] * population[pv];
@@ -248,6 +258,7 @@ void SNES::update_mu_and_sigma()
     mu[v] += sigma[v] * gradient_mu * LR;
     sigma[v] *= std::exp(eta_sigma * gradient_sigma);
   }
+  printf("mu[charge 0]: %f, mu[charge 1]: %f\n", mu[number_of_variables - 2], mu[number_of_variables - 1]);
 }
 
 void SNES::output_mu_and_sigma(char* input_dir, Parameters& para)

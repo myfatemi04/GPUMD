@@ -77,7 +77,7 @@ public:
     int num_biases;
     const float* weights;
     const float* biases;
-    const float* charges;  // charges between atoms
+    const float* c;
   };
 
   // Added by Michael Fatemi, 2022 November 12

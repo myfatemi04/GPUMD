@@ -136,7 +136,7 @@ static __global__ void find_descriptors_radial(
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
           float c = (paramb.num_types == 1)
                       ? 1.0f
-                      : dnnmb.charges[(n * paramb.num_types + t1) * paramb.num_types + t2];
+                      : dnnmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
           q[n] += fn12[n] * c;
         }
       } else {
@@ -146,7 +146,7 @@ static __global__ void find_descriptors_radial(
           for (int k = 0; k <= paramb.basis_size_radial; ++k) {
             int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2;
-            gn12 += fn12[k] * dnnmb.charges[c_index];
+            gn12 += fn12[k] * dnnmb.c[c_index];
           }
           q[n] += gn12;
         }
@@ -329,7 +329,6 @@ void NEP3::update_potential(const float* parameters, DNN& dnn)
 {
   dnn.weights = parameters;
   dnn.biases = parameters + dnn.num_weights;
-  dnn.charges = parameters + dnn.num_weights + dnn.num_biases;
 }
 
 static void __global__ find_max_min(const int N, const float* g_q, float* g_q_scaler)
@@ -865,13 +864,21 @@ static __global__ void calculate_charges(
   const int* g_NN,
   const int* g_NL,
   const int* __restrict__ g_type,
-  const NEP3::DNN dnnmb,
+  const float* base_charges,
   const int oxygen_type,
   float* output_charges
 ) {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 >= N) {
     return;
+  }
+
+  if (n1 == 0) {
+    printf("Base charges: ");
+    for (int i = 0; i < 2; i++) {
+      printf("%f ", dnnmb.charges[i]);
+    }
+    printf("\n");
   }
 
   int t1 = g_type[n1];
@@ -881,13 +888,22 @@ static __global__ void calculate_charges(
   }
   int neighbor_number = g_NN[n1];
   float total_charge = 0;
+  int count = 0;
   for (int i = 0; i < neighbor_number; i++) {
     int index = i * N + n1;
     int n2 = g_NL[index];
     int t2 = g_type[n2];
-    total_charge += dnnmb.charges[t2];
+    if (t2 != oxygen_type) {
+      total_charge += dnnmb.charges[t2];
+      count += 1;
+    }
   }
-  output_charges[n1] = -total_charge/neighbor_number;
+  if (count == 0) {
+    // Default charge of oxygen
+    output_charges[n1] = -2;
+  } else {
+    output_charges[n1] = -total_charge/count;
+  }
 }
 
 // Accumulates force and energy interactions
@@ -937,6 +953,8 @@ static __global__ void accumulate_radial_interactions(
       float fnp12[MAX_NUM_N];
       float f12[3] = {0.0f};
 
+      // Skip this for now; this way, we can focus purely on Coulomb interactions
+      /*
       if (paramb.version == 2) {
         find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
@@ -964,6 +982,7 @@ static __global__ void accumulate_radial_interactions(
           }
         }
       }
+      */
 
       // Added by Michael Fatemi, 2022 November 12
       // Integrate Coulomb force calculation with radial force function
@@ -1202,6 +1221,8 @@ void NEP3::find_force(
   nep_data.parameters.copy_from_host(parameters);
   update_potential(nep_data.parameters.data(), dnnmb);
 
+  const float* base_charges = parameters + (para.number_of_variables - para.num_types);
+
   float rc2_radial = para.rc_radial * para.rc_radial;
   float rc2_angular = para.rc_angular * para.rc_angular;
 
@@ -1243,14 +1264,24 @@ void NEP3::find_force(
   float *charges;
   cudaMalloc((void**)&charges, sizeof(float) * dataset.N);
 
+  int oxygen_type_id = -1;
+  const int OXYGEN_ATOMIC_NUMBER = 8;
+  for (int i = 0; i < para.num_types; i++) {
+    if (para.atomic_numbers[i] == OXYGEN_ATOMIC_NUMBER) {
+      oxygen_type_id = i;
+      break;
+    }
+  }
+
+  printf("Charges: %f %f\n", parameters[2282], parameters[2283]);
+
   calculate_charges<<<grid_size, block_size>>>(
     dataset.N,
     nep_data.NN_radial.data(),
     nep_data.NL_radial.data(),
     dataset.type.data(),
-    dnnmb,
-    // TODO: Ensure that this matches oxygen.
-    dataset.type.size() - 1,
+    base_charges,
+    oxygen_type_id,
     charges
   );
 
@@ -1260,26 +1291,26 @@ void NEP3::find_force(
     CUDA_CHECK_KERNEL
   }
 
-  int *dev_topology;
-  cudaMalloc((void**)&dev_topology, sizeof(int) * dnnmb.n_layers);
-  cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
+  // int *dev_topology;
+  // cudaMalloc((void**)&dev_topology, sizeof(int) * dnnmb.n_layers);
+  // cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
 
   // get energy and energy gradient
   // float *weight_grad = new float[weight_count];
   // float *bias_grad = new float[bias_count];
-  float *expected_output = new float[4 * dataset.N];
-  for (int i = 0; i < 4 * dataset.N; i++) {
-    expected_output[i] = 3.15;
-  }
+  // float *expected_output = new float[4 * dataset.N];
+  // for (int i = 0; i < 4 * dataset.N; i++) {
+  //   expected_output[i] = 3.15;
+  // }
 
-  // we can share the gradient because of atomicAdd (TODO: make sure this actually works)
-  float *grad_dev;
-  cudaMalloc((void**) &grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
-  cudaMemset(grad_dev, 0, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
+  // // we can share the gradient because of atomicAdd (TODO: make sure this actually works)
+  // float *grad_dev;
+  // cudaMalloc((void**) &grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
+  // cudaMemset(grad_dev, 0, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
 
-  float *expected_output_dev;
-  cudaMalloc((void**) &expected_output_dev, sizeof(float) * 4 * dataset.N);
-  cudaMemcpy(expected_output_dev, expected_output, sizeof(float) * 4 * dataset.N, cudaMemcpyHostToDevice);
+  // float *expected_output_dev;
+  // cudaMalloc((void**) &expected_output_dev, sizeof(float) * 4 * dataset.N);
+  // cudaMemcpy(expected_output_dev, expected_output, sizeof(float) * 4 * dataset.N, cudaMemcpyHostToDevice);
 
   // const int N,
   // const NEP3::ParaMB paramb,
@@ -1294,28 +1325,29 @@ void NEP3::find_force(
   // float* dev_bias_grad
 
   // ** APPLY DNN ** //
-  apply_dnn<<<grid_size, block_size>>>(
-    dataset.N,
-    paramb,
-    dnnmb,
-    dev_topology,
-    nep_data.descriptors.data(),
-    para.q_scaler_gpu.data(),
-    dataset.energy.data(),
-    nep_data.Fp.data(),
-    expected_output_dev,
-    // dataset.energy_ref_gpu.data(),
-    // weight gradient
-    grad_dev,
-    // bias gradient
-    grad_dev + dnnmb.num_weights
-  );
-  CUDA_CHECK_KERNEL
+  // Skip DNN part for now
+  // apply_dnn<<<grid_size, block_size>>>(
+  //   dataset.N,
+  //   paramb,
+  //   dnnmb,
+  //   dev_topology,
+  //   nep_data.descriptors.data(),
+  //   para.q_scaler_gpu.data(),
+  //   dataset.energy.data(),
+  //   nep_data.Fp.data(),
+  //   expected_output_dev,
+  //   // dataset.energy_ref_gpu.data(),
+  //   // weight gradient
+  //   grad_dev,
+  //   // bias gradient
+  //   grad_dev + dnnmb.num_weights
+  // );
+  // CUDA_CHECK_KERNEL
 
-  if (parameters_grad) {
-    cudaMemcpy((void *) parameters_grad, grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases), cudaMemcpyDeviceToHost);
-  }
-  cudaFree(grad_dev);
+  // if (parameters_grad) {
+  //   cudaMemcpy((void *) parameters_grad, grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases), cudaMemcpyDeviceToHost);
+  // }
+  // cudaFree(grad_dev);
   CUDA_CHECK_KERNEL
 
   zero_force<<<grid_size, block_size>>>(
@@ -1353,12 +1385,15 @@ void NEP3::find_force(
 
   // CUDA_CHECK_KERNEL
 
+  // Skip this, so we can isolate Coulomb interactions
+  /*
   find_force_angular<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
     dataset.type.data(), nep_data.x12_angular.data(), nep_data.y12_angular.data(),
     nep_data.z12_angular.data(), nep_data.Fp.data(), nep_data.sum_fxyz.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
   CUDA_CHECK_KERNEL
+  */
 
   if (zbl.enabled) {
     find_force_ZBL<<<grid_size, block_size>>>(
@@ -1369,5 +1404,6 @@ void NEP3::find_force(
     CUDA_CHECK_KERNEL
   }
 
-  cudaFree(dev_topology);
+  // cudaFree(dev_topology);
+  // cudaFree(charges);
 }
