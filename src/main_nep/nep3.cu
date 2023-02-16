@@ -195,7 +195,7 @@ static __global__ void find_descriptors_angular(
           fn *=
             (paramb.num_types == 1)
               ? 1.0f
-              : dnnmb.charges
+              : dnnmb.c
                   [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
           accumulate_s(d12, x12, y12, z12, fn, s);
         } else {
@@ -205,7 +205,7 @@ static __global__ void find_descriptors_angular(
           for (int k = 0; k <= paramb.basis_size_angular; ++k) {
             int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
-            gn12 += fn12[k] * dnnmb.charges[c_index];
+            gn12 += fn12[k] * dnnmb.c[c_index];
           }
           accumulate_s(d12, x12, y12, z12, gn12, s);
         }
@@ -329,6 +329,7 @@ void NEP3::update_potential(const float* parameters, DNN& dnn)
 {
   dnn.weights = parameters;
   dnn.biases = parameters + dnn.num_weights;
+  dnn.c = parameters + dnn.num_weights + dnn.num_biases;
 }
 
 static void __global__ find_max_min(const int N, const float* g_q, float* g_q_scaler)
@@ -406,8 +407,8 @@ static __device__ void affine_backward(
   float* input_grad,
   float* weight_grad,
   float* bias_grad,
-  const float* output_grad,
-  const float* expected_energy
+  const float* output_grad // ,
+  // const float* expected_energy
 ) {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -503,7 +504,7 @@ static __device__ void apply_dnn_layers(
   float* q,
   float* output,
   // Only contains a single value
-  const float* energy_ref,
+  // const float* energy_ref,
   float* input_grad
 ) {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
@@ -536,9 +537,9 @@ static __device__ void apply_dnn_layers(
     output[i] = activations[n_layers - 1][i];
   }
 
-  if (energy_ref == nullptr) {
-    return;
-  }
+  // if (energy_ref == nullptr) {
+  //   return;
+  // }
 
   float activation_grad[5][30];
 
@@ -548,22 +549,22 @@ static __device__ void apply_dnn_layers(
     }
   }
 
-  // Backpropagation
-  // Gradient of loss w.r.t. each output value goes here
-  float expected_energy = energy_ref[0];
-  // Use the real values for this later on
-  float expected_fx = 0;
-  float expected_fy = 0;
-  float expected_fz = 0;
-  // float expected_fx = expected_output[1];
-  // float expected_fy = expected_output[2];
-  // float expected_fz = expected_output[3];
+  // // Backpropagation
+  // // Gradient of loss w.r.t. each output value goes here
+  // float expected_energy = energy_ref[0];
+  // // Use the real values for this later on
+  // float expected_fx = 0;
+  // float expected_fy = 0;
+  // float expected_fz = 0;
+  // // float expected_fx = expected_output[1];
+  // // float expected_fy = expected_output[2];
+  // // float expected_fz = expected_output[3];
 
   // Loss is 0.5 x sqrt(MSE) = 0.5 x (y - yhat)^2 = y - yhat.
   int weight_grad_ptr = cumulative_weights;
   int bias_grad_ptr = cumulative_biases;
 
-  float NF = (float) N;
+  // float NF = (float) N;
 
   // MSE
   // activation_grad[n_layers - 1][0] = -(expected_energy - output[0]); // / NF;
@@ -582,6 +583,7 @@ static __device__ void apply_dnn_layers(
   // activation_grad[n_layers - 1][2] = s3 / NF;
   // activation_grad[n_layers - 1][3] = s4 / NF;
 
+  // Calculate the gradient with respect to energy
   activation_grad[n_layers - 1][0] = 1;
 
   // Huber loss (turns into MAE after a cutoff point)
@@ -625,8 +627,8 @@ static __device__ void apply_dnn_layers(
       nullptr,
       // weight_grad + weight_grad_ptr,
       // bias_grad + bias_grad_ptr,
-      activation_grad[layer_i + 1],
-      energy_ref
+      activation_grad[layer_i + 1] // ,
+      // energy_ref
     );
 
     // if (n1 == 0) {
@@ -664,11 +666,11 @@ static __global__ void apply_dnn(
   const float* __restrict__ g_descriptors,
   const float* __restrict__ g_q_scaler,
   float* g_pe,
-  float* g_Fp,
-  const float* energy_ref,
-  float* dev_weight_grad,
-  float* dev_bias_grad)
-{
+  float* g_Fp // ,
+  // const float* energy_ref,
+  // float* dev_weight_grad,
+  // float* dev_bias_grad
+) {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 < N) {
     // if (n1 == 0) {
@@ -679,7 +681,7 @@ static __global__ void apply_dnn(
     for (int d = 0; d < dev_topology[0]; ++d) {
       q[d] = g_descriptors[n1 + d * N] * g_q_scaler[d];
     }
-    float g[MAX_DIM];
+    float Fp[MAX_DIM] = {0.0f};
     float output[1];
     apply_dnn_layers(
       N,
@@ -689,13 +691,16 @@ static __global__ void apply_dnn(
       dnnmb.biases,
       q,
       output,
-      energy_ref ? (&energy_ref[n1]) : nullptr,
-      g
+      // energy_ref ? (&energy_ref[n1]) : nullptr,
+      Fp
     );
     g_pe[n1] = output[0];
+    // if (n1 == 0) {
+    //   printf("output energy: %f\n", output[0]);
+    // }
     for (int d = 0; d < dev_topology[0]; ++d) {
       // TODO: replace with real force
-      g_Fp[n1 + d * N] = output[d] * g_q_scaler[d];
+      g_Fp[n1 + d * N] = Fp[d] * g_q_scaler[d];
     }
   }
 }
@@ -859,52 +864,52 @@ static __device__ void add_coulomb_potential(
   energy += q1 * q2 * (_coulomb_potential_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_potential_part(rc_radial, coulomb.alpha, coulomb.epsilon));
 }
 
-static __global__ void calculate_charges(
-  const int N,
-  const int* g_NN,
-  const int* g_NL,
-  const int* __restrict__ g_type,
-  const float* base_charges,
-  const int oxygen_type,
-  float* output_charges
-) {
-  int n1 = threadIdx.x + blockIdx.x * blockDim.x;
-  if (n1 >= N) {
-    return;
-  }
+// static __global__ void calculate_charges(
+//   const int N,
+//   const int* g_NN,
+//   const int* g_NL,
+//   const int* __restrict__ g_type,
+//   const float* base_charges,
+//   const int oxygen_type,
+//   float* output_charges
+// ) {
+//   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+//   if (n1 >= N) {
+//     return;
+//   }
 
-  if (n1 == 0) {
-    printf("Base charges: ");
-    for (int i = 0; i < 2; i++) {
-      printf("%f ", dnnmb.charges[i]);
-    }
-    printf("\n");
-  }
+//   if (n1 == 0) {
+//     printf("Base charges: ");
+//     for (int i = 0; i < 2; i++) {
+//       printf("%f ", dnnmb.charges[i]);
+//     }
+//     printf("\n");
+//   }
 
-  int t1 = g_type[n1];
-  if (t1 != oxygen_type) {
-    output_charges[n1] = dnnmb.charges[t1];
-    return;
-  }
-  int neighbor_number = g_NN[n1];
-  float total_charge = 0;
-  int count = 0;
-  for (int i = 0; i < neighbor_number; i++) {
-    int index = i * N + n1;
-    int n2 = g_NL[index];
-    int t2 = g_type[n2];
-    if (t2 != oxygen_type) {
-      total_charge += dnnmb.charges[t2];
-      count += 1;
-    }
-  }
-  if (count == 0) {
-    // Default charge of oxygen
-    output_charges[n1] = -2;
-  } else {
-    output_charges[n1] = -total_charge/count;
-  }
-}
+//   int t1 = g_type[n1];
+//   if (t1 != oxygen_type) {
+//     output_charges[n1] = dnnmb.charges[t1];
+//     return;
+//   }
+//   int neighbor_number = g_NN[n1];
+//   float total_charge = 0;
+//   int count = 0;
+//   for (int i = 0; i < neighbor_number; i++) {
+//     int index = i * N + n1;
+//     int n2 = g_NL[index];
+//     int t2 = g_type[n2];
+//     if (t2 != oxygen_type) {
+//       total_charge += dnnmb.charges[t2];
+//       count += 1;
+//     }
+//   }
+//   if (count == 0) {
+//     // Default charge of oxygen
+//     output_charges[n1] = -2;
+//   } else {
+//     output_charges[n1] = -total_charge/count;
+//   }
+// }
 
 // Accumulates force and energy interactions
 static __global__ void accumulate_radial_interactions(
@@ -923,10 +928,10 @@ static __global__ void accumulate_radial_interactions(
   float* g_fy,
   float* g_fz,
   float* g_virial,
-  float* g_pe,
-  float* coulomb_forces,
+  float* g_pe //,
+  // float* coulomb_forces,
   // Calculated charge of each atom
-  const float* charges
+  // const float* charges
 )
 {
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
@@ -954,14 +959,13 @@ static __global__ void accumulate_radial_interactions(
       float f12[3] = {0.0f};
 
       // Skip this for now; this way, we can focus purely on Coulomb interactions
-      /*
       if (paramb.version == 2) {
         find_fn_and_fnp(paramb.n_max_radial, paramb.rcinv_radial, d12, fc12, fcp12, fn12, fnp12);
         for (int n = 0; n <= paramb.n_max_radial; ++n) {
           float tmp12 = g_Fp[n1 + n * N] * fnp12[n] * d12inv;
           tmp12 *= (paramb.num_types == 1)
                      ? 1.0f
-                     : dnnmb.charges[(n * paramb.num_types + t1) * paramb.num_types + t2];
+                     : dnnmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
           for (int d = 0; d < 3; ++d) {
             f12[d] += tmp12 * r12[d];
           }
@@ -974,7 +978,7 @@ static __global__ void accumulate_radial_interactions(
           for (int k = 0; k <= paramb.basis_size_radial; ++k) {
             int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2;
-            gnp12 += fnp12[k] * dnnmb.charges[c_index];
+            gnp12 += fnp12[k] * dnnmb.c[c_index];
           }
           float tmp12 = g_Fp[n1 + n * N] * gnp12 * d12inv;
           for (int d = 0; d < 3; ++d) {
@@ -982,23 +986,22 @@ static __global__ void accumulate_radial_interactions(
           }
         }
       }
-      */
 
       // Added by Michael Fatemi, 2022 November 12
       // Integrate Coulomb force calculation with radial force function
-      if (coulomb.enabled) {
-        float fx = f12[0];
-        float fy = f12[1];
-        float fz = f12[2];
-        int q1 = charges[n1];
-        int q2 = charges[n2];
-        add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
-        total_coulomb[0] += f12[0] - fx;
-        total_coulomb[1] += f12[1] - fy;
-        total_coulomb[2] += f12[2] - fz;
-        // n1 refers to the current structure
-        add_coulomb_potential(q1, q2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
-      }
+      // if (coulomb.enabled) {
+      //   float fx = f12[0];
+      //   float fy = f12[1];
+      //   float fz = f12[2];
+      //   int q1 = charges[n1];
+      //   int q2 = charges[n2];
+      //   add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
+      //   total_coulomb[0] += f12[0] - fx;
+      //   total_coulomb[1] += f12[1] - fy;
+      //   total_coulomb[2] += f12[2] - fz;
+      //   // n1 refers to the current structure
+      //   add_coulomb_potential(q1, q2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
+      // }
 
       atomicAdd(&g_fx[n1], f12[0]);
       atomicAdd(&g_fy[n1], f12[1]);
@@ -1017,9 +1020,9 @@ static __global__ void accumulate_radial_interactions(
     }
 
     // Logged by us
-    coulomb_forces[n1] = total_coulomb[0];
-    coulomb_forces[n1 + N] = total_coulomb[1];
-    coulomb_forces[n1 + N * 2] = total_coulomb[2];
+    // coulomb_forces[n1] = total_coulomb[0];
+    // coulomb_forces[n1 + N] = total_coulomb[1];
+    // coulomb_forces[n1 + N * 2] = total_coulomb[2];
     // coulomb_forces[n1] = sqrt((total_coulomb[0] * total_coulomb[0]) + (total_coulomb[1] * total_coulomb[1]) + (total_coulomb[2] * total_coulomb[2]));
 
     g_virial[n1] = s_virial_xx;
@@ -1086,7 +1089,7 @@ static __global__ void find_force_angular(
           const float c =
             (paramb.num_types == 1)
               ? 1.0f
-              : dnnmb.charges
+              : dnnmb.c
                   [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
           fn *= c;
           fnp *= c;
@@ -1103,8 +1106,8 @@ static __global__ void find_force_angular(
           for (int k = 0; k <= paramb.basis_size_angular; ++k) {
             int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
             c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
-            gn12 += fn12[k] * dnnmb.charges[c_index];
-            gnp12 += fnp12[k] * dnnmb.charges[c_index];
+            gn12 += fn12[k] * dnnmb.c[c_index];
+            gnp12 += fnp12[k] * dnnmb.c[c_index];
           }
           if (paramb.num_L == paramb.L_max) {
             accumulate_f12(n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
@@ -1221,8 +1224,6 @@ void NEP3::find_force(
   nep_data.parameters.copy_from_host(parameters);
   update_potential(nep_data.parameters.data(), dnnmb);
 
-  const float* base_charges = parameters + (para.number_of_variables - para.num_types);
-
   float rc2_radial = para.rc_radial * para.rc_radial;
   float rc2_angular = para.rc_angular * para.rc_angular;
 
@@ -1250,104 +1251,27 @@ void NEP3::find_force(
     nep_data.z12_angular.data(), nep_data.descriptors.data(), nep_data.sum_fxyz.data());
   CUDA_CHECK_KERNEL
 
-  /*
-  const int N,
-  const int* g_NN,
-  const int* g_NL,
-  const int* __restrict__ g_type,
-  const NEP3::DNN dnnmb,
-  const int oxygen_type,
-  const float* output_charges
-  */
-  
-  // Calculate the charge of oxygen atoms. WARN: This assumes oxygen is a type in the dataset.
-  float *charges;
-  cudaMalloc((void**)&charges, sizeof(float) * dataset.N);
-
-  int oxygen_type_id = -1;
-  const int OXYGEN_ATOMIC_NUMBER = 8;
-  for (int i = 0; i < para.num_types; i++) {
-    if (para.atomic_numbers[i] == OXYGEN_ATOMIC_NUMBER) {
-      oxygen_type_id = i;
-      break;
-    }
-  }
-
-  printf("Charges: %f %f\n", parameters[2282], parameters[2283]);
-
-  calculate_charges<<<grid_size, block_size>>>(
-    dataset.N,
-    nep_data.NN_radial.data(),
-    nep_data.NL_radial.data(),
-    dataset.type.data(),
-    base_charges,
-    oxygen_type_id,
-    charges
-  );
-
   if (calculate_q_scaler) {
     find_max_min<<<dnnmb.topology[0], 1024>>>(
       dataset.N, nep_data.descriptors.data(), para.q_scaler_gpu.data());
     CUDA_CHECK_KERNEL
   }
 
-  // int *dev_topology;
-  // cudaMalloc((void**)&dev_topology, sizeof(int) * dnnmb.n_layers);
-  // cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
-
-  // get energy and energy gradient
-  // float *weight_grad = new float[weight_count];
-  // float *bias_grad = new float[bias_count];
-  // float *expected_output = new float[4 * dataset.N];
-  // for (int i = 0; i < 4 * dataset.N; i++) {
-  //   expected_output[i] = 3.15;
-  // }
-
-  // // we can share the gradient because of atomicAdd (TODO: make sure this actually works)
-  // float *grad_dev;
-  // cudaMalloc((void**) &grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
-  // cudaMemset(grad_dev, 0, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases));
-
-  // float *expected_output_dev;
-  // cudaMalloc((void**) &expected_output_dev, sizeof(float) * 4 * dataset.N);
-  // cudaMemcpy(expected_output_dev, expected_output, sizeof(float) * 4 * dataset.N, cudaMemcpyHostToDevice);
-
-  // const int N,
-  // const NEP3::ParaMB paramb,
-  // const NEP3::DNN dnnmb,
-  // const int* dev_topology,
-  // const float* __restrict__ g_descriptors,
-  // const float* __restrict__ g_q_scaler,
-  // float* g_pe,
-  // float* g_Fp,
-  // const float* dev_expected_output,
-  // float* dev_weight_grad,
-  // float* dev_bias_grad
+  int *dev_topology;
+  cudaMalloc((void**)&dev_topology, sizeof(int) * dnnmb.n_layers);
+  cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
 
   // ** APPLY DNN ** //
-  // Skip DNN part for now
-  // apply_dnn<<<grid_size, block_size>>>(
-  //   dataset.N,
-  //   paramb,
-  //   dnnmb,
-  //   dev_topology,
-  //   nep_data.descriptors.data(),
-  //   para.q_scaler_gpu.data(),
-  //   dataset.energy.data(),
-  //   nep_data.Fp.data(),
-  //   expected_output_dev,
-  //   // dataset.energy_ref_gpu.data(),
-  //   // weight gradient
-  //   grad_dev,
-  //   // bias gradient
-  //   grad_dev + dnnmb.num_weights
-  // );
-  // CUDA_CHECK_KERNEL
-
-  // if (parameters_grad) {
-  //   cudaMemcpy((void *) parameters_grad, grad_dev, sizeof(float) * (dnnmb.num_weights + dnnmb.num_biases), cudaMemcpyDeviceToHost);
-  // }
-  // cudaFree(grad_dev);
+  apply_dnn<<<grid_size, block_size>>>(
+    dataset.N,
+    paramb,
+    dnnmb,
+    dev_topology,
+    nep_data.descriptors.data(),
+    para.q_scaler_gpu.data(),
+    dataset.energy.data(),
+    nep_data.Fp.data()
+  );
   CUDA_CHECK_KERNEL
 
   zero_force<<<grid_size, block_size>>>(
@@ -1355,10 +1279,8 @@ void NEP3::find_force(
     dataset.force.data() + dataset.N * 2);
   CUDA_CHECK_KERNEL
 
-  float *dev_coulomb_forces;
-  cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N * 3);
-
-  // This is where forces are accumulated
+  // float *dev_coulomb_forces;
+  // cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N * 3);
 
   accumulate_radial_interactions<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, dnnmb, coulomb,
@@ -1366,11 +1288,11 @@ void NEP3::find_force(
     nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
     // Added 2022 November 15, to enable us adding the Coulomb potential
-    dataset.energy.data(),
+    dataset.energy.data()
     // Added 2022 November 21, to enable us to calculate the effect of the Coulomb potential
-    dev_coulomb_forces,
+    // dev_coulomb_forces
     // Added 2022 February 8, to enable us to use charges more effectively
-    charges
+    // charges
     );
   CUDA_CHECK_KERNEL
 
@@ -1386,14 +1308,12 @@ void NEP3::find_force(
   // CUDA_CHECK_KERNEL
 
   // Skip this, so we can isolate Coulomb interactions
-  /*
   find_force_angular<<<grid_size, block_size>>>(
     dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
     dataset.type.data(), nep_data.x12_angular.data(), nep_data.y12_angular.data(),
     nep_data.z12_angular.data(), nep_data.Fp.data(), nep_data.sum_fxyz.data(), dataset.force.data(),
     dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
   CUDA_CHECK_KERNEL
-  */
 
   if (zbl.enabled) {
     find_force_ZBL<<<grid_size, block_size>>>(
@@ -1404,6 +1324,6 @@ void NEP3::find_force(
     CUDA_CHECK_KERNEL
   }
 
-  // cudaFree(dev_topology);
+  cudaFree(dev_topology);
   // cudaFree(charges);
 }
