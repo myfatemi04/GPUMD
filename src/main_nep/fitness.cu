@@ -158,6 +158,7 @@ void Fitness::report_error(
   elite[para.number_of_variables_dnn - 1] += energy_shift_per_structure;
 
   // re-calculate the test set
+  printf("Recalculating the test set\n");
   potential->find_force(para, elite, nullptr, test_set, false);
 
   char file_nep[200];
@@ -254,7 +255,7 @@ void Fitness::report_error(
   fclose(fid_force);
   fclose(fid_virial);
 
-  if (0 == (generation + 1) % 1000) {
+  if (0 == (generation + 1) % 1) {
     char file_force[200];
     strcpy(file_force, input_dir);
     strcat(file_force, "/force_train.out");

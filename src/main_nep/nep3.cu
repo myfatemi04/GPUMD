@@ -20,7 +20,8 @@ Combining high accuracy and low cost in atomistic simulations and application to
 heat transport, Phys. Rev. B. 104, 104309 (2021).
 ------------------------------------------------------------------------------*/
 
-#define USE_INVERTED_R true
+// #define USE_INVERTED_R false
+#define DISABLE_NN true
 
 #include "dataset.cuh"
 #include "mic.cuh"
@@ -100,6 +101,9 @@ static __global__ void gpu_find_neighbor_list(
         }
       }
     }
+    // if (n1 == 0) {
+    //   printf("count_radial: %d\n", count_radial);
+    // }
     NN_radial[n1] = count_radial;
     NN_angular[n1] = count_angular;
   }
@@ -765,17 +769,19 @@ If r=2ang, and eps=38, then in eV the potential energy should be 13.6/(38*2/0.52
 1/r^2 --> 13.6/(epsilon * r/0.52918 * r)
 
 [Revised:]
-If you work in SI units 1/4pi epsilon_0 = 9 10^9
-Electron charge q=1.6 10^-19 (to convert joule to eV, one factor of q drops out)
+If you work in SI units 1/4pi epsilon_0 = 9e9
+Electron charge q=1.6e-19 coulombs (to convert joule to eV, one factor of q drops out)
  
-Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10 =9*1.6/(2*38)=  0.19 eV
+Potential = 1/(4 pi epsilon_0 epsilon) * q^2/r = 9e9/38 * 1.6e-19 / 2e-10 = 9 * 1.6 / (2 * 38) = 0.19 eV
 
 1/r --> 9 * 1.6 / (r * epsilon)
 
 */
 static __device__ float _coulomb_force_part(float r, float alpha, float epsilon) {
   // return (13.6 / (epsilon * r / 0.52918 * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
-  return (9 * 1.6 / (epsilon * r * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
+  float cutoff_fn = (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
+  cutoff_fn = 1;
+  return (9 * 1.6 / (epsilon * r * r)) * cutoff_fn;
 }
 
 // Added by Michael Fatemi, 2022 November 12
@@ -808,12 +814,17 @@ static __device__ void add_coulomb_force(
   float coulomb_constant = 1 / (4 * PI * coulomb.epsilon);
   float mag = q1 * q2 * (mag_r - mag_rc) * coulomb_constant;
   */
-  float mag = q1 * q2 * (_coulomb_force_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_force_part(rc_radial, coulomb.alpha, coulomb.epsilon));
+  float mag;
+  if (d12 > rc_radial) {
+    mag = 0;
+  } else {
+    mag = q1 * q2 * (_coulomb_force_part(d12, 1/rc_radial, coulomb.epsilon) - _coulomb_force_part(rc_radial, 1/rc_radial, coulomb.epsilon));
+  }
 
   // Add force in direction of r21 (reverse, so positive magnitude = repulsion)
-  f12[0] += -mag * r12[0] / d12;
-  f12[1] += -mag * r12[1] / d12;
-  f12[2] += -mag * r12[2] / d12;
+  f12[0] += mag * r12[0] / d12;
+  f12[1] += mag * r12[1] / d12;
+  f12[2] += mag * r12[2] / d12;
 }
 
 // Added by Michael Fatemi, 2022 November 15
@@ -837,7 +848,7 @@ Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10
 1/r --> 9 * 1.6 / (r * epsilon)
 */
 static __device__ float _coulomb_potential_part(float r, float alpha, float epsilon) {
-  return 9 * 1.6 / (r * epsilon) * erfc(r * alpha);
+  return 9 * 1.6 / (r * epsilon); // * erfc(r * alpha);
 }
 
 // Added by Michael Fatemi, 2022 November 15
@@ -853,19 +864,14 @@ Parameters:
  - f12 (float&): Reference to variable containing potential energy of first
 */
 static __device__ void add_coulomb_potential(
-  int t1,
-  int t2,
-  float* r12,
+  float q1,
+  float q2,
+  float d12,
   NEP3::Coulomb coulomb,
   float rc_radial,
   float& energy)
 {
-  float q1 = coulomb.charges[t1];
-  float q2 = coulomb.charges[t2];
-
-  float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
-
-  energy += q1 * q2 * (_coulomb_potential_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_potential_part(rc_radial, coulomb.alpha, coulomb.epsilon));
+  energy += q1 * q2 * (_coulomb_potential_part(d12, 1/rc_radial, coulomb.epsilon) - _coulomb_potential_part(rc_radial, 1/rc_radial, coulomb.epsilon));
 }
 
 // static __global__ void calculate_charges(
@@ -916,13 +922,13 @@ static __device__ void add_coulomb_potential(
 // }
 
 // Accumulates force and energy interactions
-static __global__ void accumulate_radial_interactions(
+static __global__ void find_force_radial(
   const int N,
   const int* g_NN,
   const int* g_NL,
   const NEP3::ParaMB paramb,
   const NEP3::DNN dnnmb,
-  const NEP3::Coulomb coulomb,
+  // const NEP3::Coulomb coulomb,
   const int* __restrict__ g_type,
   const float* __restrict__ g_x12,
   const float* __restrict__ g_y12,
@@ -949,6 +955,12 @@ static __global__ void accumulate_radial_interactions(
     float s_virial_zx = 0.0f;
     int t1 = g_type[n1];
     float total_coulomb[3] = {0.0f, 0.0f, 0.0f};
+    if (DISABLE_NN) {
+      g_pe[n1] = 0;
+    }
+    // if (n1 == 0) {
+    //   printf("begin n1 == 0\n");
+    // }
     for (int i1 = 0; i1 < neighbor_number; ++i1) {
       int index = i1 * N + n1;
       int n2 = g_NL[index];
@@ -969,8 +981,8 @@ static __global__ void accumulate_radial_interactions(
           // Multiply by -1/r^2
           float tmp12 = g_Fp[n1 + n * N] * fnp12[n];
           tmp12 *= (paramb.num_types == 1)
-                     ? 1.0f
-                     : dnnmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
+                    ? 1.0f
+                    : dnnmb.c[(n * paramb.num_types + t1) * paramb.num_types + t2];
           for (int d = 0; d < 3; ++d) {
             f12[d] += tmp12 * (r12[d] * d12inv);
           }
@@ -994,23 +1006,39 @@ static __global__ void accumulate_radial_interactions(
         // }
       }
 
-      // Added by Michael Fatemi, 2022 November 12
-      // Integrate Coulomb force calculation with radial force function
-      if (coulomb.enabled) {
-        float fx = f12[0];
-        float fy = f12[1];
-        float fz = f12[2];
-        int q1 = coulomb.charges[t1];
-        int q2 = coulomb.charges[t2];
-        // int q1 = charges[n1];
-        // int q2 = charges[n2];
-        add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
-        total_coulomb[0] += f12[0] - fx;
-        total_coulomb[1] += f12[1] - fy;
-        total_coulomb[2] += f12[2] - fz;
-        // n1 refers to the current structure
-        add_coulomb_potential(q1, q2, r12, coulomb, paramb.rc_radial, g_pe[n1]);
-      }
+      // // Added by Michael Fatemi, 2022 November 12
+      // // Integrate Coulomb force calculation with radial force function
+      // if (coulomb.enabled) {
+      //   // if (n1 == 0) {
+      //   //   printf("Applying Coulomb potential and force\n");
+      //   // }
+      //   float fx = f12[0];
+      //   float fy = f12[1];
+      //   float fz = f12[2];
+      //   float q1 = coulomb.charges[t1];
+      //   float q2 = coulomb.charges[t2];
+      //   // if (n1 == 0) {
+      //   //   printf("Coulomb args: %f %f\n", coulomb.epsilon, coulomb.alpha);
+      //   // }
+      //   // int q1 = charges[n1];
+      //   // int q2 = charges[n2];
+      //   add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
+      //   total_coulomb[0] += f12[0] - fx;
+      //   total_coulomb[1] += f12[1] - fy;
+      //   total_coulomb[2] += f12[2] - fz;
+      //   // if (n1 == 0) {
+      //   //   printf("g_pe before: %f\n", g_pe[n1]);
+      //   // }
+      //   // n1 refers to the current structure, and n2 refers to the neighboring structure
+      //   add_coulomb_potential(q1, q2, d12, coulomb, paramb.rc_radial, g_pe[n1]);
+      //   // add_coulomb_potential(q1, q2, d12, coulomb, paramb.rc_radial, g_pe[n2]);
+      //   // float coulomb_result = q1 * q2 * (_coulomb_potential_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_potential_part(paramb.rc_radial, coulomb.alpha, coulomb.epsilon));
+      //   // g_pe[n1] += coulomb_result;
+      //   // if (n1 == 0) {
+      //   //   printf("q1: %f, q2: %f, d12: %f, coulomb: %f, g_pe: %f\n", q1, q2, d12, coulomb_result, g_pe[n1]);
+      //   //   // printf("q1: %f, q2: %f, d12: %f, coulomb: %f\n", q1, q2, d12, q1 * q2 / d12 * 9 / (1.6 * coulomb.epsilon));
+      //   // }
+      // }
 
       atomicAdd(&g_fx[n1], f12[0]);
       atomicAdd(&g_fy[n1], f12[1]);
@@ -1040,6 +1068,112 @@ static __global__ void accumulate_radial_interactions(
     g_virial[n1 + N * 3] = s_virial_xy;
     g_virial[n1 + N * 4] = s_virial_yz;
     g_virial[n1 + N * 5] = s_virial_zx;
+  }
+}
+
+static __global__ void add_coulomb(
+  const int N,
+  const int* g_NN,
+  const int* g_NL,
+  const NEP3::ParaMB paramb,
+  const NEP3::Coulomb coulomb,
+  const int* __restrict__ g_type,
+  const float* __restrict__ g_x12,
+  const float* __restrict__ g_y12,
+  const float* __restrict__ g_z12,
+  float* g_fx,
+  float* g_fy,
+  float* g_fz,
+  float* g_pe
+) {
+// Accumulates force and energy interactions
+// static __global__ void accumulate_radial_interactions(
+//   const int N,
+//   const int* g_NN,
+//   const int* g_NL,
+//   const NEP3::ParaMB paramb,
+//   const NEP3::DNN dnnmb,
+//   const NEP3::Coulomb coulomb,
+//   const int* __restrict__ g_type,
+//   const float* __restrict__ g_x12,
+//   const float* __restrict__ g_y12,
+//   const float* __restrict__ g_z12,
+//   const float* __restrict__ g_Fp,
+//   float* g_fx,
+//   float* g_fy,
+//   float* g_fz,
+//   float* g_virial,
+//   float* g_pe //,
+//   // float* coulomb_forces,
+//   // Calculated charge of each atom
+//   // const float* charges
+// )
+  int n1 = threadIdx.x + blockIdx.x * blockDim.x;
+  if (n1 < N) {
+    int neighbor_number = g_NN[n1];
+    float s_virial_xx = 0.0f;
+    float s_virial_yy = 0.0f;
+    float s_virial_zz = 0.0f;
+    float s_virial_xy = 0.0f;
+    float s_virial_yz = 0.0f;
+    float s_virial_zx = 0.0f;
+    int t1 = g_type[n1];
+    float total_coulomb[3] = {0.0f, 0.0f, 0.0f};
+    if (DISABLE_NN) {
+      g_pe[n1] = 0;
+    }
+    // if (n1 == 0) {
+    //   printf("begin n1 == 0\n");
+    // }
+    for (int i1 = 0; i1 < neighbor_number; ++i1) {
+      int index = i1 * N + n1;
+      int n2 = g_NL[index];
+      int t2 = g_type[n2];
+      float r12[3] = {g_x12[index], g_y12[index], g_z12[index]};
+      float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+      float d12inv = 1.0f / d12;
+      float f12[3] = {0.0f};
+
+      // if (n1 == 0) {
+      //   printf("n2: %d; d12: %f\n", n2, d12);
+      // }
+      
+      // Added by Michael Fatemi, 2022 November 12
+      // Integrate Coulomb force calculation with radial force function
+      if (coulomb.enabled) {
+        // if (n1 == 0) {
+        //   printf("Applying Coulomb potential and force\n");
+        // }
+        float fx = f12[0];
+        float fy = f12[1];
+        float fz = f12[2];
+        float q1 = coulomb.charges[t1];
+        float q2 = coulomb.charges[t2];
+        add_coulomb_force(q1, q2, r12, coulomb, paramb.rc_radial, f12);
+        // total_coulomb[0] += f12[0] - fx;
+        // total_coulomb[1] += f12[1] - fy;
+        // total_coulomb[2] += f12[2] - fz;
+        // // if (n1 == 0) {
+        // //   printf("g_pe before: %f\n", g_pe[n1]);
+        // // }
+        // n1 refers to the current structure, and n2 refers to the neighboring structure
+        add_coulomb_potential(q1, q2, d12, coulomb, paramb.rc_radial, g_pe[n1]);
+        // add_coulomb_potential(q1, q2, d12, coulomb, paramb.rc_radial, g_pe[n2]);
+        // float coulomb_result = q1 * q2 * (_coulomb_potential_part(d12, coulomb.alpha, coulomb.epsilon) - _coulomb_potential_part(paramb.rc_radial, coulomb.alpha, coulomb.epsilon));
+        // g_pe[n1] += coulomb_result;
+        // if (n1 == 0) {
+        //   printf("q1: %f, q2: %f, d12: %f, coulomb: %f, g_pe: %f\n", q1, q2, d12, coulomb_result, g_pe[n1]);
+        //   // printf("q1: %f, q2: %f, d12: %f, coulomb: %f\n", q1, q2, d12, q1 * q2 / d12 * 9 / (1.6 * coulomb.epsilon));
+        // }
+      }
+
+      atomicAdd(&g_fx[n1], f12[0]);
+      atomicAdd(&g_fy[n1], f12[1]);
+      atomicAdd(&g_fz[n1], f12[2]);
+      atomicAdd(&g_fx[n2], -f12[0]);
+      atomicAdd(&g_fy[n2], -f12[1]);
+      atomicAdd(&g_fz[n2], -f12[2]);
+    }
   }
 }
 
@@ -1093,41 +1227,43 @@ static __global__ void find_force_angular(
       // Angular descriptor calculations are kinda diff.
       float used_d12 = d12; // (USE_INVERTED_R) ? (1 / d12) : d12;
 
-      if (paramb.version == 2) {
-        for (int n = 0; n <= paramb.n_max_angular; ++n) {
-          float fn;
-          float fnp;
-          find_fn_and_fnp(n, paramb.rcinv_angular, used_d12, fc12, fcp12, fn, fnp);
-          const float c =
-            (paramb.num_types == 1)
-              ? 1.0f
-              : dnnmb.c
-                  [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
-          fn *= c;
-          fnp *= c;
-          accumulate_f12(n, paramb.n_max_angular + 1, used_d12, r12, fn, fnp, Fp, sum_fxyz, f12);
-        }
-      } else {
-        float fn12[MAX_NUM_N];
-        float fnp12[MAX_NUM_N];
-        find_fn_and_fnp(paramb.basis_size_angular, paramb.rcinv_angular, used_d12, fc12, fcp12, fn12, fnp12);
-        for (int n = 0; n <= paramb.n_max_angular; ++n) {
-          float gn12 = 0.0f;
-          float gnp12 = 0.0f;
-          for (int k = 0; k <= paramb.basis_size_angular; ++k) {
-            int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
-            c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
-            gn12 += fn12[k] * dnnmb.c[c_index];
-            gnp12 += fnp12[k] * dnnmb.c[c_index];
+      if (!DISABLE_NN) {
+        if (paramb.version == 2) {
+          for (int n = 0; n <= paramb.n_max_angular; ++n) {
+            float fn;
+            float fnp;
+            find_fn_and_fnp(n, paramb.rcinv_angular, used_d12, fc12, fcp12, fn, fnp);
+            const float c =
+              (paramb.num_types == 1)
+                ? 1.0f
+                : dnnmb.c
+                    [((paramb.n_max_radial + 1 + n) * paramb.num_types + t1) * paramb.num_types + t2];
+            fn *= c;
+            fnp *= c;
+            accumulate_f12(n, paramb.n_max_angular + 1, used_d12, r12, fn, fnp, Fp, sum_fxyz, f12);
           }
-          if (paramb.num_L == paramb.L_max) {
-            accumulate_f12(n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
-          } else if (paramb.num_L == paramb.L_max + 1) {
-            accumulate_f12_with_4body(
-              n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
-          } else {
-            accumulate_f12_with_5body(
-              n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+        } else {
+          float fn12[MAX_NUM_N];
+          float fnp12[MAX_NUM_N];
+          find_fn_and_fnp(paramb.basis_size_angular, paramb.rcinv_angular, used_d12, fc12, fcp12, fn12, fnp12);
+          for (int n = 0; n <= paramb.n_max_angular; ++n) {
+            float gn12 = 0.0f;
+            float gnp12 = 0.0f;
+            for (int k = 0; k <= paramb.basis_size_angular; ++k) {
+              int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
+              c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
+              gn12 += fn12[k] * dnnmb.c[c_index];
+              gnp12 += fnp12[k] * dnnmb.c[c_index];
+            }
+            if (paramb.num_L == paramb.L_max) {
+              accumulate_f12(n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+            } else if (paramb.num_L == paramb.L_max + 1) {
+              accumulate_f12_with_4body(
+                n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+            } else {
+              accumulate_f12_with_5body(
+                n, paramb.n_max_angular + 1, used_d12, r12, gn12, gnp12, Fp, sum_fxyz, f12);
+            }
           }
         }
       }
@@ -1273,17 +1409,19 @@ void NEP3::find_force(
   cudaMemcpy(dev_topology, dnnmb.topology, sizeof(int) * dnnmb.n_layers, cudaMemcpyHostToDevice);
 
   // ** APPLY DNN ** //
-  apply_dnn<<<grid_size, block_size>>>(
-    dataset.N,
-    paramb,
-    dnnmb,
-    dev_topology,
-    nep_data.descriptors.data(),
-    para.q_scaler_gpu.data(),
-    dataset.energy.data(),
-    nep_data.Fp.data()
-  );
-  CUDA_CHECK_KERNEL
+  if (!DISABLE_NN) {
+    apply_dnn<<<grid_size, block_size>>>(
+      dataset.N,
+      paramb,
+      dnnmb,
+      dev_topology,
+      nep_data.descriptors.data(),
+      para.q_scaler_gpu.data(),
+      dataset.energy.data(),
+      nep_data.Fp.data()
+    );
+    CUDA_CHECK_KERNEL
+  }
 
   zero_force<<<grid_size, block_size>>>(
     dataset.N, dataset.force.data(), dataset.force.data() + dataset.N,
@@ -1293,18 +1431,21 @@ void NEP3::find_force(
   // float *dev_coulomb_forces;
   // cudaMalloc((void**)&dev_coulomb_forces, sizeof(float) * dataset.N * 3);
 
-  accumulate_radial_interactions<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, dnnmb, coulomb,
-    dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
-    nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
-    dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
-    // Added 2022 November 15, to enable us adding the Coulomb potential
+  add_coulomb<<<grid_size, block_size>>>(
+    dataset.N,
+    nep_data.NN_radial.data(),
+    nep_data.NL_radial.data(),
+    paramb,
+    coulomb,
+    dataset.type.data(),
+    nep_data.x12_radial.data(),
+    nep_data.y12_radial.data(),
+    nep_data.z12_radial.data(),
+    dataset.force.data(),
+    dataset.force.data() + dataset.N,
+    dataset.force.data() + dataset.N * 2,
     dataset.energy.data()
-    // Added 2022 November 21, to enable us to calculate the effect of the Coulomb potential
-    // dev_coulomb_forces
-    // Added 2022 February 8, to enable us to use charges more effectively
-    // charges
-    );
+  );
   CUDA_CHECK_KERNEL
 
   // Copy back to host
@@ -1319,20 +1460,35 @@ void NEP3::find_force(
   // CUDA_CHECK_KERNEL
 
   // Skip this, so we can isolate Coulomb interactions
-  find_force_angular<<<grid_size, block_size>>>(
-    dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
-    dataset.type.data(), nep_data.x12_angular.data(), nep_data.y12_angular.data(),
-    nep_data.z12_angular.data(), nep_data.Fp.data(), nep_data.sum_fxyz.data(), dataset.force.data(),
-    dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
-  CUDA_CHECK_KERNEL
+  if (!DISABLE_NN) {
+    find_force_radial<<<grid_size, block_size>>>(
+      dataset.N, nep_data.NN_radial.data(), nep_data.NL_radial.data(), paramb, dnnmb, // coulomb,
+      dataset.type.data(), nep_data.x12_radial.data(), nep_data.y12_radial.data(),
+      nep_data.z12_radial.data(), nep_data.Fp.data(), dataset.force.data(),
+      dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data(),
+      // Added 2022 November 15, to enable us adding the Coulomb potential
+      dataset.energy.data()
+      // Added 2022 November 21, to enable us to calculate the effect of the Coulomb potential
+      // dev_coulomb_forces
+      // Added 2022 February 8, to enable us to use charges more effectively
+      // charges
+    );
 
-  if (zbl.enabled) {
-    find_force_ZBL<<<grid_size, block_size>>>(
-      dataset.N, zbl, nep_data.NN_angular.data(), nep_data.NL_angular.data(), dataset.type.data(),
-      nep_data.x12_angular.data(), nep_data.y12_angular.data(), nep_data.z12_angular.data(),
-      dataset.force.data(), dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2,
-      dataset.virial.data(), dataset.energy.data());
+    find_force_angular<<<grid_size, block_size>>>(
+      dataset.N, nep_data.NN_angular.data(), nep_data.NL_angular.data(), paramb, dnnmb,
+      dataset.type.data(), nep_data.x12_angular.data(), nep_data.y12_angular.data(),
+      nep_data.z12_angular.data(), nep_data.Fp.data(), nep_data.sum_fxyz.data(), dataset.force.data(),
+      dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2, dataset.virial.data());
     CUDA_CHECK_KERNEL
+
+    if (zbl.enabled) {
+      find_force_ZBL<<<grid_size, block_size>>>(
+        dataset.N, zbl, nep_data.NN_angular.data(), nep_data.NL_angular.data(), dataset.type.data(),
+        nep_data.x12_angular.data(), nep_data.y12_angular.data(), nep_data.z12_angular.data(),
+        dataset.force.data(), dataset.force.data() + dataset.N, dataset.force.data() + dataset.N * 2,
+        dataset.virial.data(), dataset.energy.data());
+      CUDA_CHECK_KERNEL
+    }
   }
 
   cudaFree(dev_topology);
