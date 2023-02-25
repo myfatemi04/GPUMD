@@ -780,7 +780,6 @@ Potential = 1/(4 pi epsilon_0 epsilon) * q^2/r = 9e9/38 * 1.6e-19 / 2e-10 = 9 * 
 static __device__ float _coulomb_force_part(float r, float alpha, float epsilon) {
   // return (13.6 / (epsilon * r / 0.52918 * r)) * (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
   float cutoff_fn = (erfc(alpha * r) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * r * r)));
-  cutoff_fn = 1;
   return (9 * 1.6 / (epsilon * r * r)) * cutoff_fn;
 }
 
@@ -818,6 +817,14 @@ static __device__ void add_coulomb_force(
   if (d12 > rc_radial) {
     mag = 0;
   } else {
+    // Fennell sum
+    // https://bioweb.pasteur.fr/docs/modules/lammps/19Sep13/pair_coul.html
+    // float r = d12;
+    // float alpha = 1/rc_radial;
+    // mag = q1 * q2 * (
+    //   erfc(alpha * r) / r -
+    //   erfc(alpha * rc_radial) / rc_radial +
+    //   (erfc(alpha * r) / (rc_radial * rc_radial) + 2 * alpha / sqrt(PI) * r * exp(-(alpha * alpha * rc_radial * rc_radial))/rc_radial) * (d12 - rc_radial));
     mag = q1 * q2 * (_coulomb_force_part(d12, 1/rc_radial, coulomb.epsilon) - _coulomb_force_part(rc_radial, 1/rc_radial, coulomb.epsilon));
   }
 
@@ -848,7 +855,8 @@ Potential = 1/(4 pi epsilon_0 epsilon) *q^2/r = 9 10^9/38 *1.6 10^-19 / 2 10^-10
 1/r --> 9 * 1.6 / (r * epsilon)
 */
 static __device__ float _coulomb_potential_part(float r, float alpha, float epsilon) {
-  return 9 * 1.6 / (r * epsilon); // * erfc(r * alpha);
+  // Wolf
+  return 9 * 1.6 / (r * epsilon) * erfc(r * alpha);
 }
 
 // Added by Michael Fatemi, 2022 November 15
@@ -871,7 +879,14 @@ static __device__ void add_coulomb_potential(
   float rc_radial,
   float& energy)
 {
-  energy += q1 * q2 * (_coulomb_potential_part(d12, 1/rc_radial, coulomb.epsilon) - _coulomb_potential_part(rc_radial, 1/rc_radial, coulomb.epsilon));
+  float alpha = 1/rc_radial;
+  energy += q1 * q2 * (
+    (_coulomb_potential_part(d12, alpha, coulomb.epsilon) - _coulomb_potential_part(rc_radial, alpha, coulomb.epsilon)) +
+    // Fennell
+    (
+      erfc(alpha * rc_radial)/(rc_radial * rc_radial) + 2 * alpha / sqrt(PI) * exp(-(alpha * alpha * rc_radial * rc_radial)) / rc_radial
+    ) * (d12 - rc_radial)
+  );
 }
 
 // static __global__ void calculate_charges(
@@ -1111,12 +1126,9 @@ static __global__ void add_coulomb(
   int n1 = threadIdx.x + blockIdx.x * blockDim.x;
   if (n1 < N) {
     int neighbor_number = g_NN[n1];
-    float s_virial_xx = 0.0f;
-    float s_virial_yy = 0.0f;
-    float s_virial_zz = 0.0f;
-    float s_virial_xy = 0.0f;
-    float s_virial_yz = 0.0f;
-    float s_virial_zx = 0.0f;
+    // if (n1 == 0) {
+    //   printf("number of neighboring atoms to atom 0: %d\n", neighbor_number);
+    // }
     int t1 = g_type[n1];
     float total_coulomb[3] = {0.0f, 0.0f, 0.0f};
     if (DISABLE_NN) {
